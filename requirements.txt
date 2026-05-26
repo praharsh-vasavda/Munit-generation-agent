@@ -1,0 +1,16 @@
+# litellm==1.45.0  # Removed - causes tiktoken/Rust dependency issues
+PyGithub>=2.3.0
+atlassian-python-api>=3.41.0
+pdfplumber>=0.10.0
+python-docx>=1.1.0
+lxml>=5.2.0
+python-dotenv>=1.0.0
+PyYAML>=6.0.1
+typer>=0.12.0
+rich>=13.7.0
+tenacity>=8.4.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+Flask>=2.3.0
+Werkzeug>=2.3.0
+chardet>=5.0.0  # For robust encoding detection

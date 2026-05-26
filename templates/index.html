@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MUnit Generation Agent</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <style>
+        .fade-in {
+            animation: fadeIn 0.5s ease-in;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .progress-bar {
+            transition: width 0.3s ease;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <!-- Header -->
+    <header class="bg-blue-600 text-white shadow-lg">
+        <div class="container mx-auto px-4 py-6">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h1 class="text-3xl font-bold">MUnit Generation Agent</h1>
+                    <p class="text-blue-100 mt-1">Generate MUnit test suites from Mule XML and business use cases</p>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <button onclick="checkConfig()" class="bg-blue-500 hover:bg-blue-400 px-4 py-2 rounded transition">
+                        Check Config
+                    </button>
+                    <button onclick="showHealth()" class="bg-green-500 hover:bg-green-400 px-4 py-2 rounded transition">
+                        Health Check
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="container mx-auto px-4 py-8">
+        <!-- Configuration Status -->
+        <div id="configStatus" class="hidden mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg fade-in">
+            <h3 class="font-semibold text-blue-800 mb-2">Configuration Status</h3>
+            <div id="configDetails"></div>
+        </div>
+
+        <!-- Generation Form -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h2 class="text-2xl font-semibold mb-6">Generate MUnit Test Suite</h2>
+            
+            <!-- XML Source Tabs -->
+            <div class="mb-6">
+                <h3 class="text-lg font-medium mb-3">Mule XML Source</h3>
+                <div class="flex space-x-1 mb-4">
+                    <button onclick="switchTab('xml', 'local')" class="tab-btn px-4 py-2 bg-blue-500 text-white rounded-t" data-tab="xml-local">Local File</button>
+                    <button onclick="switchTab('xml', 'github')" class="tab-btn px-4 py-2 bg-gray-200 text-gray-700 rounded-t" data-tab="xml-github">GitHub</button>
+                </div>
+
+                <!-- Local XML Files -->
+                <div id="xml-local" class="tab-content active">
+                    <div class="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
+                        <input type="file" id="xmlFile" accept=".xml" multiple class="hidden" onchange="handleFileSelect('xml')">
+                        <label for="xmlFile" class="cursor-pointer">
+                            <div class="text-gray-600">
+                                <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                </svg>
+                                <p class="mt-2">Click to upload Mule XML files</p>
+                                <p class="text-sm text-gray-500">.xml files only (multiple files supported)</p>
+                                <p class="text-xs text-blue-600 mt-1">You can select multiple Mule XML files</p>
+                            </div>
+                        </label>
+                        <div id="xmlFileList" class="mt-4 space-y-2"></div>
+                    </div>
+                </div>
+
+                <!-- GitHub XML -->
+                <div id="xml-github" class="tab-content">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Repository</label>
+                            <input type="text" id="githubRepo" placeholder="owner/repo-name" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Branch</label>
+                            <input type="text" id="githubBranch" value="main" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-medium text-gray-700 mb-1">File Path</label>
+                            <input type="text" id="githubFilePath" placeholder="src/main/mule/my-api.xml" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-medium text-gray-700 mb-1">GitHub Token (optional)</label>
+                            <input type="password" id="githubToken" placeholder="ghp_xxxx" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Use Case Source Tabs -->
+            <div class="mb-6">
+                <h3 class="text-lg font-medium mb-3">Business Use Case Source <span class="text-sm text-gray-500 font-normal">(Optional - will use default scenarios if not provided)</span></h3>
+                <div class="flex space-x-1 mb-4">
+                    <button onclick="switchTab('usecase', 'local')" class="tab-btn px-4 py-2 bg-blue-500 text-white rounded-t" data-tab="usecase-local">Local File</button>
+                    <button onclick="switchTab('usecase', 'confluence')" class="tab-btn px-4 py-2 bg-gray-200 text-gray-700 rounded-t" data-tab="usecase-confluence">Confluence</button>
+                    <button onclick="switchTab('usecase', 'none')" class="tab-btn px-4 py-2 bg-gray-200 text-gray-700 rounded-t" data-tab="usecase-none">Skip (Use Default)</button>
+                </div>
+
+                <!-- Local Use Case Files -->
+                <div id="usecase-local" class="tab-content active">
+                    <div class="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
+                        <input type="file" id="usecaseFile" accept=".txt,.pdf,.docx,.doc" multiple class="hidden" onchange="handleFileSelect('usecase')">
+                        <label for="usecaseFile" class="cursor-pointer">
+                            <div class="text-gray-600">
+                                <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                </svg>
+                                <p class="mt-2">Click to upload business use case documents</p>
+                                <p class="text-sm text-gray-500">.txt, .pdf, .docx, .doc files (multiple files supported)</p>
+                                <p class="text-xs text-blue-600 mt-1">You can select multiple files at once</p>
+                            </div>
+                        </label>
+                        <div id="usecaseFileList" class="mt-4 space-y-2"></div>
+                    </div>
+                </div>
+
+                <!-- Confluence Use Case -->
+                <div id="usecase-confluence" class="tab-content">
+                    <div class="grid grid-cols-1 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Confluence Page URL</label>
+                            <input type="url" id="confluenceUrl" placeholder="https://company.atlassian.net/wiki/spaces/XX/pages/123456" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">API Token</label>
+                                <input type="password" id="confluenceToken" placeholder="Confluence API token" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                                <input type="email" id="confluenceEmail" placeholder="your.email@company.com" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Skip Use Case -->
+                <div id="usecase-none" class="tab-content">
+                    <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                        <div class="flex">
+                            <div class="flex-shrink-0">
+                                <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                                </svg>
+                            </div>
+                            <div class="ml-3">
+                                <h3 class="text-sm font-medium text-yellow-800">Using Default Scenarios</h3>
+                                <div class="mt-2 text-sm text-yellow-700">
+                                    <p>No business use case document provided. The system will generate default test scenarios based on your Mule flow type:</p>
+                                    <ul class="list-disc list-inside mt-1 space-y-1">
+                                        <li><strong>REST API:</strong> Happy path, error cases, validation</li>
+                                        <li><strong>Batch Job:</strong> Success, partial failure, empty input</li>
+                                        <li><strong>Scheduler:</strong> Normal execution, downstream failure</li>
+                                        <li><strong>Generic:</strong> Basic flow testing</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Output Options -->
+            <div class="mb-6">
+                <h3 class="text-lg font-medium mb-3">Output Options</h3>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Output Directory</label>
+                    <input type="text" id="outputPath" value="./output/" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+            </div>
+
+            <!-- Generate Button -->
+            <div class="flex justify-center">
+                <button onclick="generateMUnit()" class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-8 rounded-lg transition duration-200 transform hover:scale-105">
+                    Generate MUnit Test Suite
+                </button>
+            </div>
+        </div>
+
+        <!-- Progress Section -->
+        <div id="progressSection" class="hidden bg-white rounded-lg shadow-md p-6 mb-6 fade-in">
+            <h3 class="text-xl font-semibold mb-4">Generation Progress</h3>
+            <div class="mb-4">
+                <div class="flex justify-between mb-2">
+                    <span id="progressMessage">Starting...</span>
+                    <span id="progressPercent">0%</span>
+                </div>
+                <div class="w-full bg-gray-200 rounded-full h-3">
+                    <div id="progressBar" class="progress-bar bg-blue-600 h-3 rounded-full" style="width: 0%"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="resultsSection" class="hidden bg-white rounded-lg shadow-md p-6 fade-in">
+            <h3 class="text-xl font-semibold mb-4">Generation Results</h3>
+            <div id="resultsContent"></div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-gray-800 text-white py-6 mt-12">
+        <div class="container mx-auto px-4 text-center">
+            <p>MUnit Generation Agent - Web Version</p>
+            <p class="text-gray-400 text-sm mt-1">Generate MUnit test suites from Mule XML and business use cases</p>
+        </div>
+    </footer>
+
+    <script>
+        let currentJobId = null;
+        let progressInterval = null;
+
+        // Tab switching
+        function switchTab(type, source) {
+            // Hide all tab contents
+            document.querySelectorAll(`[id^="${type}-"]`).forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Show selected tab
+            document.getElementById(`${type}-${source}`).classList.add('active');
+            
+            // Update button styles
+            document.querySelectorAll(`[data-tab^="${type}-"]`).forEach(btn => {
+                btn.classList.remove('bg-blue-500', 'text-white');
+                btn.classList.add('bg-gray-200', 'text-gray-700');
+            });
+            
+            const activeBtn = document.querySelector(`[data-tab="${type}-${source}"]`);
+            activeBtn.classList.remove('bg-gray-200', 'text-gray-700');
+            activeBtn.classList.add('bg-blue-500', 'text-white');
+        }
+
+        // File selection handling
+        function handleFileSelect(type) {
+            const fileInput = document.getElementById(type === 'xml' ? 'xmlFile' : 'usecaseFile');
+            
+            if (type === 'xml') {
+                const fileListDiv = document.getElementById('xmlFileList');
+                fileListDiv.innerHTML = '';
+                
+                if (fileInput.files.length > 0) {
+                    // Validate files are XML
+                    const validFiles = [];
+                    const invalidFiles = [];
+                    
+                    for (let i = 0; i < fileInput.files.length; i++) {
+                        const file = fileInput.files[i];
+                        if (file.name.toLowerCase().endsWith('.xml')) {
+                            validFiles.push(file);
+                        } else {
+                            invalidFiles.push(file);
+                        }
+                    }
+                    
+                    if (invalidFiles.length > 0) {
+                        // Show warning for invalid files
+                        const warningDiv = document.createElement('div');
+                        warningDiv.className = 'bg-yellow-50 border border-yellow-200 text-yellow-800 p-3 rounded mb-2';
+                        warningDiv.innerHTML = `
+                            <div class="flex">
+                                <div class="flex-shrink-0">
+                                    <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                                    </svg>
+                                </div>
+                                <div class="ml-3">
+                                    <h3 class="text-sm font-medium text-yellow-800">Invalid Files Detected</h3>
+                                    <div class="text-sm text-yellow-700 mt-1">
+                                        The following files are not XML and will be skipped:
+                                        <ul class="list-disc list-inside mt-1">
+                                            ${invalidFiles.map(f => `<li>${f.name}</li>`).join('')}
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        fileListDiv.appendChild(warningDiv);
+                    }
+                    
+                    if (validFiles.length > 0) {
+                        const fileCount = validFiles.length;
+                        const headerDiv = document.createElement('div');
+                        headerDiv.className = 'text-sm font-medium text-gray-700 mb-2';
+                        headerDiv.textContent = `Selected ${fileCount} Mule XML file${fileCount > 1 ? 's' : ''}:`;
+                        fileListDiv.appendChild(headerDiv);
+                        
+                        for (let i = 0; i < validFiles.length; i++) {
+                            const file = validFiles[i];
+                            const fileItem = document.createElement('div');
+                            fileItem.className = 'flex items-center justify-between bg-gray-50 p-2 rounded border';
+                            fileItem.innerHTML = `
+                                <div class="flex items-center">
+                                    <svg class="h-4 w-4 text-green-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                    </svg>
+                                    <span class="text-sm text-gray-700">${file.name}</span>
+                                    <span class="text-xs text-gray-500 ml-2">(${formatFileSize(file.size)})</span>
+                                </div>
+                                <button onclick="removeXmlFile(${i})" class="text-red-500 hover:text-red-700 text-sm">
+                                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                </button>
+                            `;
+                            fileListDiv.appendChild(fileItem);
+                        }
+                    } else {
+                        const emptyDiv = document.createElement('div');
+                        emptyDiv.className = 'text-red-600 text-sm';
+                        emptyDiv.textContent = 'No valid XML files selected. Please select .xml files only.';
+                        fileListDiv.appendChild(emptyDiv);
+                    }
+                }
+            } else if (type === 'usecase') {
+                const fileListDiv = document.getElementById('usecaseFileList');
+                fileListDiv.innerHTML = '';
+                
+                if (fileInput.files.length > 0) {
+                    const fileCount = fileInput.files.length;
+                    const headerDiv = document.createElement('div');
+                    headerDiv.className = 'text-sm font-medium text-gray-700 mb-2';
+                    headerDiv.textContent = `Selected ${fileCount} file${fileCount > 1 ? 's' : ''}:`;
+                    fileListDiv.appendChild(headerDiv);
+                    
+                    for (let i = 0; i < fileInput.files.length; i++) {
+                        const file = fileInput.files[i];
+                        const fileItem = document.createElement('div');
+                        fileItem.className = 'flex items-center justify-between bg-gray-50 p-2 rounded border';
+                        fileItem.innerHTML = `
+                            <div class="flex items-center">
+                                <svg class="h-4 w-4 text-blue-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                </svg>
+                                <span class="text-sm text-gray-700">${file.name}</span>
+                                <span class="text-xs text-gray-500 ml-2">(${formatFileSize(file.size)})</span>
+                            </div>
+                            <button onclick="removeUsecaseFile(${i})" class="text-red-500 hover:text-red-700 text-sm">
+                                <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        `;
+                        fileListDiv.appendChild(fileItem);
+                    }
+                }
+            }
+        }
+        
+        // Format file size
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        // Remove specific use case file
+        function removeUsecaseFile(index) {
+            const fileInput = document.getElementById('usecaseFile');
+            const dt = new DataTransfer();
+            
+            // Add all files except the one to remove
+            for (let i = 0; i < fileInput.files.length; i++) {
+                if (i !== index) {
+                    dt.items.add(fileInput.files[i]);
+                }
+            }
+            
+            // Update file input
+            fileInput.files = dt.files;
+            
+            // Refresh display
+            handleFileSelect('usecase');
+        }
+        
+        // Remove specific XML file
+        function removeXmlFile(index) {
+            const fileInput = document.getElementById('xmlFile');
+            const dt = new DataTransfer();
+            
+            // Add all files except the one to remove
+            for (let i = 0; i < fileInput.files.length; i++) {
+                if (i !== index) {
+                    dt.items.add(fileInput.files[i]);
+                }
+            }
+            
+            // Update file input
+            fileInput.files = dt.files;
+            
+            // Refresh display
+            handleFileSelect('xml');
+        }
+
+        // Generate MUnit
+        async function generateMUnit() {
+            try {
+                // Validate inputs
+                if (!validateInputs()) {
+                    return;
+                }
+
+                // Show progress
+                document.getElementById('progressSection').classList.remove('hidden');
+                document.getElementById('resultsSection').classList.add('hidden');
+
+                // Prepare form data
+                const formData = new FormData();
+                
+                // Add source types
+                const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
+                const usecaseSource = document.querySelector('#usecase-local.active') ? 'local' : 
+                                     document.querySelector('#usecase-confluence.active') ? 'confluence' : 'none';
+                
+                formData.append('xml_source', xmlSource);
+                
+                // Only add use case source if not "none"
+                if (usecaseSource !== 'none') {
+                    formData.append('usecase_source', usecaseSource);
+                }
+                
+                formData.append('output_path', document.getElementById('outputPath').value);
+
+                // Add files or URLs
+                if (xmlSource === 'local') {
+                    const xmlFiles = document.getElementById('xmlFile').files;
+                    for (let i = 0; i < xmlFiles.length; i++) {
+                        formData.append('xml_file', xmlFiles[i]);
+                    }
+                } else {
+                    formData.append('github_repo', document.getElementById('githubRepo').value);
+                    formData.append('github_branch', document.getElementById('githubBranch').value);
+                    formData.append('github_file_path', document.getElementById('githubFilePath').value);
+                    formData.append('github_token', document.getElementById('githubToken').value);
+                }
+
+                if (usecaseSource === 'local') {
+                    const usecaseFiles = document.getElementById('usecaseFile').files;
+                    for (let i = 0; i < usecaseFiles.length; i++) {
+                        formData.append('usecase_file', usecaseFiles[i]);
+                    }
+                } else if (usecaseSource === 'confluence') {
+                    formData.append('confluence_url', document.getElementById('confluenceUrl').value);
+                    formData.append('confluence_token', document.getElementById('confluenceToken').value);
+                    formData.append('confluence_email', document.getElementById('confluenceEmail').value);
+                }
+                // If usecaseSource is 'none', don't add any use case data
+
+                // Start generation
+                const response = await axios.post('/api/generate', formData, {
+                    headers: {
+                        'Content-Type': 'multipart/form-data'
+                    }
+                });
+
+                if (response.data.success) {
+                    currentJobId = response.data.job_id;
+                    startProgressTracking();
+                } else {
+                    showError(response.data.error);
+                }
+
+            } catch (error) {
+                showError('Failed to start generation: ' + error.message);
+            }
+        }
+
+        // Progress tracking
+        function startProgressTracking() {
+            progressInterval = setInterval(async () => {
+                try {
+                    const response = await axios.get(`/api/job-status/${currentJobId}`);
+                    const status = response.data;
+
+                    // Update progress
+                    document.getElementById('progressBar').style.width = `${status.progress}%`;
+                    document.getElementById('progressPercent').textContent = `${status.progress}%`;
+                    document.getElementById('progressMessage').textContent = status.message;
+
+                    // Check if complete
+                    if (status.status === 'error') {
+                        clearInterval(progressInterval);
+                        showError(status.message);
+                    } else if (status.progress === 100) {
+                        clearInterval(progressInterval);
+                        showResults();
+                    }
+                } catch (error) {
+                    clearInterval(progressInterval);
+                    showError('Failed to track progress: ' + error.message);
+                }
+            }, 1000);
+        }
+
+        // Show results
+        async function showResults() {
+            try {
+                const response = await axios.get(`/api/job-result/${currentJobId}`);
+                const result = response.data;
+
+                document.getElementById('progressSection').classList.add('hidden');
+                document.getElementById('resultsSection').classList.remove('hidden');
+
+                if (result.success) {
+                    const resultsHTML = `
+                        <div class="space-y-4">
+                            <div class="bg-green-50 p-4 rounded-lg border border-green-200">
+                                <h4 class="font-semibold text-green-800 mb-2">Generation Successful!</h4>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                                    <div><strong>Output File:</strong> ${result.output_file}</div>
+                                    <div><strong>Job Type:</strong> ${result.flow_summary.job_type}</div>
+                                    <div><strong>Main Flow:</strong> ${result.flow_summary.flows[0] || 'N/A'}</div>
+                                    <div><strong>Scenarios:</strong> ${result.scenarios_count}</div>
+                                    <div><strong>Generation Time:</strong> ${result.generation_time.toFixed(2)}s</div>
+                                    <div><strong>Model Used:</strong> ${result.metadata.model_used}</div>
+                                </div>
+                            </div>
+                            <div class="flex justify-center">
+                                <a href="/api/download/${currentJobId}" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg transition">
+                                    Download MUnit File
+                                </a>
+                            </div>
+                        </div>
+                    `;
+                    document.getElementById('resultsContent').innerHTML = resultsHTML;
+                } else {
+                    document.getElementById('resultsContent').innerHTML = `
+                        <div class="bg-red-50 p-4 rounded-lg border border-red-200">
+                            <h4 class="font-semibold text-red-800 mb-2">Generation Failed</h4>
+                            <p class="text-red-600">${result.error}</p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                showError('Failed to get results: ' + error.message);
+            }
+        }
+
+        // Input validation
+        function validateInputs() {
+            const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
+            const usecaseSource = document.querySelector('#usecase-local.active') ? 'local' : 
+                                 document.querySelector('#usecase-confluence.active') ? 'confluence' : 'none';
+
+            // Mule XML is COMPULSORY
+            if (xmlSource === 'local' && document.getElementById('xmlFile').files.length === 0) {
+                showError('Please select at least one Mule XML file (required)');
+                return false;
+            }
+
+            if (xmlSource === 'github') {
+                if (!document.getElementById('githubRepo').value || !document.getElementById('githubFilePath').value) {
+                    showError('Please provide GitHub repository and file path (required)');
+                    return false;
+                }
+            }
+
+            // Business use case is OPTIONAL - validate only if not "none"
+            if (usecaseSource === 'local' && document.getElementById('usecaseFile').files.length === 0) {
+                // No use case file provided - that's OK, will use default scenarios
+                return true;
+            }
+
+            if (usecaseSource === 'confluence') {
+                if (!document.getElementById('confluenceUrl').value) {
+                    showError('Please provide Confluence URL or switch to local file');
+                    return false;
+                }
+                if (!document.getElementById('confluenceToken').value || !document.getElementById('confluenceEmail').value) {
+                    showError('Please provide Confluence token and email');
+                    return false;
+                }
+            }
+
+            // If usecaseSource is 'none', no validation needed
+            return true;
+        }
+
+        // Error handling
+        function showError(message) {
+            clearInterval(progressInterval);
+            document.getElementById('progressSection').classList.add('hidden');
+            
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-4 fade-in';
+            errorDiv.innerHTML = `
+                <strong>Error:</strong> ${message}
+                <button onclick="this.parentElement.remove()" class="float-right text-red-500 hover:text-red-700">&times;</button>
+            `;
+            
+            const main = document.querySelector('main');
+            main.insertBefore(errorDiv, main.firstChild);
+            
+            setTimeout(() => errorDiv.remove(), 5000);
+        }
+
+        // Configuration check
+        async function checkConfig() {
+            try {
+                const response = await axios.get('/api/config');
+                const config = response.data;
+                
+                const configDiv = document.getElementById('configStatus');
+                const configDetails = document.getElementById('configDetails');
+                
+                configDetails.innerHTML = `
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                        <div>
+                            <strong>LLM Models:</strong> ${config.llm_models.available_models.length} available
+                            ${config.llm_models.missing_keys.length > 0 ? `<br><span class="text-orange-600">Missing: ${config.llm_models.missing_keys.join(', ')}</span>` : '<br><span class="text-green-600">All configured</span>'}
+                        </div>
+                        <div>
+                            <strong>GitHub:</strong> ${config.github_config.has_token ? 'Token configured' : 'No token'}
+                        </div>
+                        <div>
+                            <strong>Confluence:</strong> ${config.confluence_config.valid ? 'Configured' : 'Not configured'}
+                        </div>
+                        <div>
+                            <strong>Output:</strong> ${config.output_config.output_path}
+                        </div>
+                    </div>
+                `;
+                
+                configDiv.classList.remove('hidden');
+            } catch (error) {
+                showError('Failed to check configuration: ' + error.message);
+            }
+        }
+
+        // Health check
+        async function showHealth() {
+            try {
+                const response = await axios.get('/health');
+                const health = response.data;
+                
+                alert(`Health Status: ${health.status}\nActive Jobs: ${health.active_jobs}\nTimestamp: ${health.timestamp}`);
+            } catch (error) {
+                showError('Failed to check health: ' + error.message);
+            }
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            // Set initial tab states
+            switchTab('xml', 'local');
+            switchTab('usecase', 'local');
+        });
+    </script>
+</body>
+</html>

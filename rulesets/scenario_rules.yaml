@@ -1,0 +1,288 @@
+# Scenario Rules — v2
+# KEY CHANGE: test_data is DERIVED from flow XML, never hardcoded
+
+scenario_derivation_rules:
+  description: >
+    Before generating any scenario, the agent must analyze the flow XML to extract:
+    1. INPUT SCHEMA  — what the trigger (HTTP listener, MQ, SFTP, scheduler) receives
+    2. OUTPUT SCHEMA — what the final transform/set-payload produces
+    3. CONNECTORS    — what outbound calls exist (determines which mocks to build)
+    4. CONDITIONS    — choice routers, validators, error handlers (determines scenario branches)
+  
+  input_derivation_by_trigger:
+    http:listener:
+      method: "read from listener path + HTTP method attribute"
+      payload_fields: "read from first transform:message that reads payload.X or payload.body.X"
+      example: "if transform reads payload.customerId and payload.amount, input is {customerId, amount}"
+    
+    anypoint-mq:subscriber:
+      payload_fields: "read from first transform that reads payload after subscriber"
+    
+    sftp:listener:
+      payload_fields: "derive from DataWeave that parses the file — CSV headers or JSON fields"
+    
+    scheduler:
+      payload_fields: "null — scheduler has no input payload"
+    
+    kafka:consumer:
+      payload_fields: "read from first transform that reads payload after consumer"
+
+  output_derivation:
+    method: "find the last transform:message or set-payload before flow ends"
+    extract: "all top-level output field names from the DataWeave output block"
+
+job_type_scenarios:
+  rest_api:
+    required_scenarios:
+      - name: "happy_path"
+        description: "Valid input, all connectors succeed"
+        trigger: "http_listener"
+        set_event:
+          payload: "DERIVE: build from flow's first inbound DataWeave input fields"
+          attributes:
+            method: "DERIVE: from http:listener allowed-methods"
+            requestPath: "DERIVE: from http:listener path"
+        mock_strategy: "success — use derive_from_downstream_transform for each connector"
+        assertions:
+          - "payload not null"
+          - "statusCode == 200"
+          - "each key output field is not null (derived from final transform)"
+
+      - name: "empty_payload"
+        description: "Empty or null body sent"
+        trigger: "http_listener"
+        set_event:
+          payload: "#[null]"
+          mediaType: "application/json"
+          attributes:
+            method: "DERIVE: same as happy_path"
+        mock_strategy: "none — flow should reject before reaching connectors"
+        assertions:
+          - "error is thrown OR statusCode == 400"
+          - "if flow has explicit validation: assert error.errorType"
+
+      - name: "downstream_api_failure"
+        description: "Outbound HTTP/DB/SF connector returns error"
+        trigger: "http_listener"
+        set_event:
+          payload: "DERIVE: same as happy_path (valid input)"
+          attributes: "DERIVE: same as happy_path"
+        mock_strategy: "error — override connector mocks to return error responses"
+        mock_error_overrides:
+          http:request:
+            statusCode: 500
+            payload: "DERIVE: check flow error handler — what error payload does it expect"
+          db:select:
+            raise_error: "DB:CONNECTIVITY"
+          salesforce:query:
+            raise_error: "SALESFORCE:CONNECTIVITY"
+        assertions:
+          - "statusCode in [500, 502, 503] OR error thrown"
+          - "error.errorType matches connector namespace"
+
+      - name: "invalid_input"
+        description: "Required fields missing or wrong type"
+        trigger: "http_listener"
+        set_event:
+          payload: "DERIVE: remove one required field from happy_path payload"
+          attributes: "DERIVE: same as happy_path"
+        mock_strategy: "none — validation should fail before connectors"
+        assertions:
+          - "statusCode == 400 or 422"
+          - "error thrown"
+
+    optional_scenarios:
+      - name: "not_found"
+        description: "Resource does not exist — connector returns empty"
+        trigger: "http_listener"
+        set_event:
+          payload: "DERIVE: use valid structure but non-existent ID"
+        mock_strategy: "empty — db:select returns [], http returns 404"
+        assertions:
+          - "statusCode == 404 OR payload is empty"
+
+      - name: "timeout"
+        description: "Downstream service times out"
+        trigger: "http_listener"
+        mock_error_overrides:
+          http:request:
+            raise_error: "HTTP:TIMEOUT"
+        assertions:
+          - "statusCode == 504 OR error.errorType contains TIMEOUT"
+
+  batch_job:
+    required_scenarios:
+      - name: "all_records_success"
+        description: "All batch records process without error"
+        trigger: "batch_job_trigger or scheduler"
+        set_event:
+          payload: "DERIVE: build array of 2-3 objects using fields from batch:step DataWeave"
+          mediaType: "application/json"
+        mock_strategy: "success for all connectors inside batch:step"
+        assertions:
+          - "vars.batchJobResult is not null (derive var name from batch:on-complete)"
+          - "verify outbound connector called N times (once per record)"
+
+      - name: "partial_failure"
+        description: "First record succeeds, second record triggers error in batch:step"
+        set_event:
+          payload: "DERIVE: 2-item array where item[1] has a field value that triggers error"
+        mock_strategy:
+          first_call: "return success payload"
+          second_call: "raise error or return empty"
+        note: "Use munit-tools:mock-when with call-count matching if available, else use error raise"
+        assertions:
+          - "batch completes (no exception escapes)"
+          - "check vars set in batch:on-complete for failed count"
+
+      - name: "empty_input"
+        description: "Empty array input — batch should complete immediately"
+        set_event:
+          payload: "[]"
+          mediaType: "application/json"
+        mock_strategy: "none needed"
+        assertions:
+          - "no error thrown"
+          - "batch on-complete vars show 0 records processed"
+
+      - name: "all_records_fail"
+        description: "Every record fails in batch:step"
+        set_event:
+          payload: "DERIVE: 2-item array where all items trigger connector error"
+        mock_strategy: "raise error for all connector calls inside batch:step"
+        assertions:
+          - "batch completes without uncaught exception"
+          - "failed count variable > 0"
+
+  scheduler:
+    required_scenarios:
+      - name: "normal_execution"
+        description: "Scheduler fires, all downstream succeeds"
+        trigger: "scheduler"
+        set_event:
+          payload: "#[null]"
+          attributes:
+            scheduledTime: "2024-01-15T10:00:00Z"
+        mock_strategy: "success for all outbound connectors"
+        assertions:
+          - "no error thrown"
+          - "verify each outbound connector was called once"
+          - "DERIVE: if flow sets a result variable, assert it"
+
+      - name: "downstream_failure"
+        description: "Scheduler fires but downstream system is unavailable"
+        trigger: "scheduler"
+        set_event:
+          payload: "#[null]"
+        mock_strategy: "raise error on first outbound connector"
+        assertions:
+          - "error is thrown OR flow handles it in error-handler"
+          - "DERIVE: check if flow has error handler that swallows — assert its side effect"
+
+  mq_consumer:
+    required_scenarios:
+      - name: "valid_message"
+        description: "Well-formed message processed successfully"
+        trigger: "mq_subscriber_set_event"
+        set_event:
+          payload: "DERIVE: from first DataWeave after subscriber"
+          mediaType: "application/json"
+          attributes:
+            messageId: "MSG-TEST-001"
+            destination:
+              name: "DERIVE: from anypoint-mq:subscriber destination attribute"
+        mock_strategy: "success for all downstream connectors"
+        assertions:
+          - "no error thrown"
+          - "verify downstream connectors called"
+
+      - name: "malformed_message"
+        description: "Message body is not valid JSON or missing required fields"
+        set_event:
+          payload: '"this is not json"'
+          mediaType: "text/plain"
+        mock_strategy: "none — flow should fail on transform"
+        assertions:
+          - "error is thrown (MULE:EXPRESSION or MULE:TRANSFORM)"
+
+      - name: "downstream_failure"
+        description: "Message is valid but downstream connector fails"
+        set_event:
+          payload: "DERIVE: same as valid_message"
+        mock_strategy: "raise error on outbound connector"
+        assertions:
+          - "error thrown OR error-handler invoked"
+
+  sftp_listener:
+    required_scenarios:
+      - name: "valid_file"
+        description: "Valid file content processed successfully"
+        trigger: "sftp_listener_set_event"
+        set_event:
+          payload: "DERIVE: build sample file content matching format flow expects (CSV/JSON/XML)"
+          mediaType: "DERIVE: from sftp:listener or first transform mediaType"
+          attributes:
+            fileName: "test-input.csv"
+            directory: "DERIVE: from sftp:listener directory attribute"
+            size: 512
+        mock_strategy: "success for all downstream connectors"
+        assertions:
+          - "no error thrown"
+          - "verify downstream connector called"
+
+      - name: "empty_file"
+        description: "File with no content"
+        set_event:
+          payload: '""'
+          attributes:
+            fileName: "empty.csv"
+            size: 0
+        mock_strategy: "none"
+        assertions:
+          - "error thrown OR flow handles gracefully"
+
+      - name: "malformed_file"
+        description: "File content does not match expected format"
+        set_event:
+          payload: '"INVALID_CONTENT_$$$$"'
+          attributes:
+            fileName: "bad-file.csv"
+        assertions:
+          - "error thrown (MULE:EXPRESSION or MULE:TRANSFORM)"
+
+  kafka_consumer:
+    required_scenarios:
+      - name: "valid_message"
+        description: "Valid Kafka message processed end to end"
+        trigger: "kafka_set_event"
+        set_event:
+          payload: "DERIVE: from first DataWeave after kafka:consumer"
+          mediaType: "application/json"
+          attributes:
+            topic: "DERIVE: from kafka:consumer topic attribute"
+            partition: 0
+            offset: 0
+        mock_strategy: "success"
+        assertions:
+          - "no error thrown"
+          - "verify downstream connectors called"
+
+      - name: "malformed_message"
+        set_event:
+          payload: '"invalid"'
+          mediaType: "text/plain"
+        assertions:
+          - "error thrown"
+
+      - name: "downstream_failure"
+        set_event:
+          payload: "DERIVE: same as valid_message"
+        mock_strategy: "raise error on downstream connector"
+        assertions:
+          - "error thrown or handled"
+
+# REMOVED: scenario_defaults.test_data hardcoded values
+# All test data must be derived per the derivation_rules above
+
+# REMOVED: mock_response_templates with hardcoded payloads
+# All mock payloads must be derived per mock_strategies.yaml derivation algorithm

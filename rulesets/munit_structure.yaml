@@ -1,0 +1,306 @@
+# MUnit 3.6.0 Structure Rules — v2
+
+xml_namespaces:
+  munit: "http://www.mulesoft.org/schema/mule/munit"
+  munit_tools: "http://www.mulesoft.org/schema/mule/munit-tools"
+  core: "http://www.mulesoft.org/schema/mule/core"
+  doc: "http://www.mulesoft.org/schema/mule/documentation"
+
+schema_locations:
+  - "http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/3.6.0/mule-munit.xsd"
+  - "http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/3.6.0/mule-munit-tools.xsd"
+  - "http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd"
+
+test_naming_convention: "{flow-name}-{scenario-name}-test"
+# Example: get-customer-flow-happy-path-test
+# Example: process-order-flow-downstream-failure-test
+
+# ─────────────────────────────────────────
+# BEHAVIOR SECTION RULES (setup / mocks)
+# ─────────────────────────────────────────
+behavior_section:
+  description: "Sets up mocks AND/OR the input event before execution"
+
+  # RULE: What goes in behavior depends on the trigger type
+  trigger_rules:
+    http_listener:
+      primary_element: "munit:set-event"     # set payload + HTTP attributes
+      secondary_elements: ["munit-tools:mock-when"]  # for outbound connectors only
+    
+    mq_subscriber:
+      primary_element: "munit:set-event"     # set message payload + MQ attributes
+      secondary_elements: ["munit-tools:mock-when"]
+    
+    sftp_listener:
+      primary_element: "munit:set-event"     # set file content + file attributes
+      secondary_elements: ["munit-tools:mock-when"]
+    
+    kafka_consumer:
+      primary_element: "munit:set-event"     # set message payload + Kafka attributes
+      secondary_elements: ["munit-tools:mock-when"]
+    
+    scheduler:
+      primary_element: "munit:set-event"     # set null payload + scheduled time attribute
+      secondary_elements: ["munit-tools:mock-when"]
+    
+    batch_job:
+      primary_element: "munit:set-event"     # set array payload for batch input
+      secondary_elements: ["munit-tools:mock-when"]
+
+  # RULE: mock-when is ONLY used for outbound connectors
+  mock_when_applies_to:
+    - "http:request"
+    - "db:select"
+    - "db:insert"
+    - "db:update"
+    - "db:delete"
+    - "salesforce:query"
+    - "salesforce:create"
+    - "salesforce:update"
+    - "anypoint-mq:publish"
+    - "kafka:producer"
+    - "sftp:read"
+    - "email:send"
+
+  mock_when_does_NOT_apply_to:
+    - "transform:message"    # NEVER mock DataWeave
+    - "logger"               # NEVER mock loggers
+    - "set-variable"         # NEVER mock set-variable
+    - "set-payload"          # NEVER mock set-payload
+    - "flow-ref (subflow)"   # Let subflows execute by default
+    - "http:listener"        # Source connector — use set-event instead
+    - "anypoint-mq:subscriber"  # Source connector — use set-event instead
+    - "sftp:listener"           # Source connector — use set-event instead
+    - "scheduler"               # Source connector — use set-event instead
+    - "kafka:consumer"          # Source connector — use set-event instead
+
+  # RULE: error scenarios use raise-error instead of returning a payload
+  error_mock_structure:
+    use_raise_error: true
+    xml_template: |
+      <munit-tools:mock-when processor="{connector}::{operation}"
+          doc:name="Mock {connector} failure">
+          <munit-tools:with-attributes>
+              <munit-tools:with-attribute
+                  attributeName="doc:name"
+                  whereValue="{connector_doc_name}"/>
+          </munit-tools:with-attributes>
+          <munit-tools:then-return>
+              <munit-tools:error typeId="{ERROR_NAMESPACE}:{ERROR_TYPE}"/>
+          </munit-tools:then-return>
+      </munit-tools:mock-when>
+
+# ─────────────────────────────────────────
+# SET-EVENT STRUCTURE
+# ─────────────────────────────────────────
+set_event_structure:
+  full_template: |
+    <munit:set-event doc:name="Set input event">
+        <munit:payload
+            value='{DERIVED_PAYLOAD_JSON}'
+            mediaType="application/json"/>
+        <munit:attributes
+            value="#[{
+                method: 'POST',
+                requestPath: '/api/resource',
+                headers: {
+                    'content-type': 'application/json'
+                },
+                queryParams: {}
+            }]"
+            mediaType="application/java"/>
+    </munit:set-event>
+
+  scheduler_template: |
+    <munit:set-event doc:name="Set scheduler trigger">
+        <munit:payload value="#[null]"/>
+        <munit:attributes
+            value="#[{scheduledTime: '2024-01-15T10:00:00Z' as DateTime}]"
+            mediaType="application/java"/>
+    </munit:set-event>
+
+  mq_template: |
+    <munit:set-event doc:name="Set MQ message">
+        <munit:payload
+            value='{DERIVED_PAYLOAD_JSON}'
+            mediaType="application/json"/>
+        <munit:attributes
+            value="#[{
+                messageId: 'MSG-TEST-001',
+                destination: {name: '{QUEUE_NAME}', exchangeName: ''}
+            }]"
+            mediaType="application/java"/>
+    </munit:set-event>
+
+  sftp_template: |
+    <munit:set-event doc:name="Set SFTP file event">
+        <munit:payload
+            value='{DERIVED_FILE_CONTENT}'
+            mediaType="text/plain"/>
+        <munit:attributes
+            value="#[{
+                fileName: 'test-input.csv',
+                directory: '{SFTP_DIRECTORY}',
+                size: 512,
+                timestamp: '2024-01-15T10:00:00Z' as DateTime
+            }]"
+            mediaType="application/java"/>
+    </munit:set-event>
+
+# ─────────────────────────────────────────
+# EXECUTION SECTION RULES
+# ─────────────────────────────────────────
+execution_section:
+  description: "Always a single flow-ref to the flow under test"
+  rules:
+    - "Always reference the MAIN flow, never a subflow directly"
+    - "Never add any other elements here"
+  template: |
+    <flow-ref name="{flow-name}" doc:name="Execute {flow-name}"/>
+
+# ─────────────────────────────────────────
+# VALIDATION SECTION RULES
+# ─────────────────────────────────────────
+validation_section:
+  description: "Assertions and verify-call checks"
+  
+  ordering:
+    - "1. payload not null (always first)"
+    - "2. statusCode check (for HTTP flows)"
+    - "3. key field assertions (derived from output transform)"
+    - "4. verify-call for void connectors (MQ publish, email, etc.)"
+
+  error_scenario_structure:
+    note: >
+      For error scenarios, wrap the flow-ref in munit:execution and
+      add expected-error to the test attributes OR use try-catch pattern
+    preferred_approach: "use expected attribute on munit:test"
+    template: |
+      <munit:test name="{test-name}"
+                  description="{description}"
+                  expectedErrorType="{ERROR_NAMESPACE}:{ERROR_TYPE}">
+          <!-- behavior and execution as normal -->
+          <!-- validation only asserts on error details, not payload -->
+      </munit:test>
+
+  verify_call_template: |
+    <munit-tools:verify-call
+        processor="{connector}::{operation}"
+        doc:name="Verify {description}"
+        times="1"/>
+
+# ─────────────────────────────────────────
+# COMPLETE TEST TEMPLATES
+# ─────────────────────────────────────────
+complete_test_templates:
+
+  http_happy_path: |
+    <munit:test name="{flow-name}-happy-path-test"
+                description="Happy path: valid input returns 200 with expected payload">
+        <munit:behavior>
+            <munit:set-event doc:name="Set valid request">
+                <munit:payload
+                    value='{DERIVED_INPUT_PAYLOAD}'
+                    mediaType="application/json"/>
+                <munit:attributes
+                    value="#[{method: '{HTTP_METHOD}', requestPath: '{HTTP_PATH}', headers: {'content-type': 'application/json'}}]"
+                    mediaType="application/java"/>
+            </munit:set-event>
+            <!-- One mock-when per outbound connector, payload DERIVED from downstream DWL -->
+            <munit-tools:mock-when processor="{connector}::{operation}"
+                doc:name="Mock {connector_doc_name}">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute
+                        attributeName="doc:name"
+                        whereValue="{connector_doc_name}"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload
+                        value='{DERIVED_MOCK_PAYLOAD}'
+                        mediaType="application/json"/>
+                    <munit-tools:attributes
+                        value="#[{statusCode: 200}]"
+                        mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="{flow-name}" doc:name="Execute {flow-name}"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that
+                expression="#[payload]"
+                is="#[munit-tools:notNullValue()]"
+                message="Payload must not be null"
+                doc:name="Assert payload not null"/>
+            <munit-tools:assert-that
+                expression="#[attributes.statusCode]"
+                is="#[munit-tools:equalTo(200)]"
+                message="Status should be 200"
+                doc:name="Assert status 200"/>
+            <!-- One assert per key output field, DERIVED from final transform -->
+            <munit-tools:assert-that
+                expression="#[payload.{OUTPUT_FIELD}]"
+                is="#[munit-tools:notNullValue()]"
+                message="Field {OUTPUT_FIELD} must be present"
+                doc:name="Assert {OUTPUT_FIELD} present"/>
+        </munit:validation>
+    </munit:test>
+
+  http_downstream_failure: |
+    <munit:test name="{flow-name}-downstream-failure-test"
+                description="Downstream failure: connector error propagates correctly"
+                expectedErrorType="{ERROR_NAMESPACE}:{ERROR_TYPE}">
+        <munit:behavior>
+            <munit:set-event doc:name="Set valid request">
+                <munit:payload value='{DERIVED_INPUT_PAYLOAD}' mediaType="application/json"/>
+                <munit:attributes
+                    value="#[{method: '{HTTP_METHOD}', requestPath: '{HTTP_PATH}'}]"
+                    mediaType="application/java"/>
+            </munit:set-event>
+            <munit-tools:mock-when processor="{connector}::{operation}"
+                doc:name="Mock {connector_doc_name} failure">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute
+                        attributeName="doc:name"
+                        whereValue="{connector_doc_name}"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:error typeId="{ERROR_NAMESPACE}:{ERROR_TYPE}"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="{flow-name}" doc:name="Execute {flow-name}"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that
+                expression="#[error.errorType.identifier]"
+                is="#[munit-tools:equalTo('{ERROR_TYPE}')]"
+                doc:name="Assert error type"/>
+        </munit:validation>
+    </munit:test>
+
+  scheduler_normal: |
+    <munit:test name="{flow-name}-normal-execution-test"
+                description="Scheduler: normal execution completes successfully">
+        <munit:behavior>
+            <munit:set-event doc:name="Set scheduler trigger">
+                <munit:payload value="#[null]"/>
+                <munit:attributes
+                    value="#[{scheduledTime: '2024-01-15T10:00:00Z' as DateTime}]"
+                    mediaType="application/java"/>
+            </munit:set-event>
+            <!-- mocks for outbound connectors DERIVED from flow -->
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="{flow-name}" doc:name="Execute {flow-name}"/>
+        </munit:execution>
+        <munit:validation>
+            <!-- verify-call for each void outbound connector -->
+            <munit-tools:verify-call
+                processor="{connector}::{operation}"
+                doc:name="Verify {connector} called"
+                times="1"/>
+        </munit:validation>
+    </munit:test>

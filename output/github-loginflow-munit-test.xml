@@ -1,0 +1,54 @@
+<?xml version="1.0" ?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:munit="http://www.mulesoft.org/schema/mule/munit" xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd                           http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd                           http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
+    <munit:config name="github-loginflow-test-suite"/>
+    <munit:test name="github-loginflow-test-valid-request-returns-github-repositories" description="Valid request returns GitHub repositories">
+        <munit:behavior>
+            <munit:set-event doc:name="Set HTTP Request">
+                <munit:payload value="#[null]" mediaType="application/json"/>
+                <munit:attributes value="#[{                     method: &quot;GET&quot;,                     requestPath: &quot;/github/login&quot;,                     headers: {&quot;content-type&quot;: &quot;application/json&quot;},                     queryParams: {&quot;userName&quot;: &quot;testuser&quot;},                     uriParams: {}                 }]"/>
+            </munit:set-event>
+            <munit-tools:mock-when processor="http:request">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Request"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{                         &quot;id&quot;: 123456789,                         &quot;owner&quot;: {                             &quot;login&quot;: &quot;testuser&quot;                         }                     }, {                         &quot;id&quot;: 987654321,                         &quot;owner&quot;: {                             &quot;login&quot;: &quot;testuser&quot;                         }                     }]]" mediaType="application/json"/>
+                    <munit-tools:attributes value="#[{statusCode: 200, headers: {&quot;content-type&quot;: &quot;application/json&quot;}}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="github_loginFlow"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload]" is="#[MunitTools::notNullValue()]"/>
+            <munit-tools:assert-that expression="#[payload]" is="#[MunitTools::hasSize(2)]"/>
+            <munit-tools:assert-that expression="#[payload[0].id]" is="#[MunitTools::equalTo(123456789)]"/>
+            <munit-tools:assert-that expression="#[payload[0].user]" is="#[MunitTools::equalTo(&quot;testuser&quot;)]"/>
+            <munit-tools:assert-that expression="#[payload[1].id]" is="#[MunitTools::equalTo(987654321)]"/>
+            <munit-tools:assert-that expression="#[payload[1].user]" is="#[MunitTools::equalTo(&quot;testuser&quot;)]"/>
+        </munit:validation>
+    </munit:test>
+    <munit:test name="github-loginflow-test-github-api-error-handling" description="GitHub API error handling">
+        <munit:behavior>
+            <munit:set-event doc:name="Set HTTP Request">
+                <munit:payload value="#[null]" mediaType="application/json"/>
+                <munit:attributes value="#[{                     method: &quot;GET&quot;,                     requestPath: &quot;/github/login&quot;,                     headers: {&quot;content-type&quot;: &quot;application/json&quot;},                     queryParams: {&quot;userName&quot;: &quot;testuser&quot;},                     uriParams: {}                 }]"/>
+            </munit:set-event>
+            <munit-tools:mock-when processor="http:request">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="doc:name" whereValue="Request"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:error typeId="HTTP:UNAUTHORIZED"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="github_loginFlow"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[error.errorType.identifier]" is="#[MunitTools::equalTo(&quot;UNAUTHORIZED&quot;)]"/>
+        </munit:validation>
+    </munit:test>
+</mule>

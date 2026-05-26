@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MUnit Generation Agent</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <style>
+        .drop-zone {
+            transition: all 0.3s ease;
+        }
+        .drop-zone.dragover {
+            background-color: #f0f9ff;
+            border-color: #3b82f6;
+        }
+        .progress-bar {
+            transition: width 0.3s ease;
+        }
+        .file-item {
+            animation: slideIn 0.3s ease;
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <!-- Header -->
+    <header class="bg-white shadow-sm border-b">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0">
+                        <h1 class="text-2xl font-bold text-gray-900">MUnit Generation Agent</h1>
+                    </div>
+                </div>
+                <div class="text-sm text-gray-500">
+                    Generate comprehensive MUnit tests for your Mule applications
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- Upload Section -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h2 class="text-xl font-semibold mb-6">Upload Project Files</h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- Mule Project Upload -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                        Mule Project <span class="text-red-500">*</span>
+                    </label>
+                    <div class="drop-zone border-2 border-dashed border-gray-300 rounded-lg p-6 text-center"
+                         ondrop="handleDrop(event, 'mule')" 
+                         ondragover="handleDragOver(event)" 
+                         ondragleave="handleDragLeave(event)">
+                        <input type="file" id="muleZip" accept=".zip" class="hidden" onchange="handleFileSelect('mule')">
+                        <label for="muleZip" class="cursor-pointer">
+                            <div class="text-gray-600">
+                                <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2H5a2 2 0 00-2 2z" />
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5a2 2 0 012-2h4a2 2 0 012 2v4H8V5z" />
+                                </svg>
+                                <p class="mt-2">Click to upload or drag & drop</p>
+                                <p class="text-sm text-gray-500">Mule project ZIP file</p>
+                            </div>
+                        </label>
+                        <div id="muleFileList" class="mt-4"></div>
+                    </div>
+                </div>
+
+                <!-- Documentation Upload -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                        Documentation <span class="text-gray-400">(Optional)</span>
+                    </label>
+                    <div class="drop-zone border-2 border-dashed border-gray-300 rounded-lg p-6 text-center"
+                         ondrop="handleDrop(event, 'doc')" 
+                         ondragover="handleDragOver(event)" 
+                         ondragleave="handleDragLeave(event)">
+                        <input type="file" id="docZip" accept=".zip" class="hidden" onchange="handleFileSelect('doc')">
+                        <label for="docZip" class="cursor-pointer">
+                            <div class="text-gray-600">
+                                <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                </svg>
+                                <p class="mt-2">Click to upload or drag & drop</p>
+                                <p class="text-sm text-gray-500">Documentation ZIP file (optional)</p>
+                            </div>
+                        </label>
+                        <div id="docFileList" class="mt-4"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Generate Button -->
+            <div class="mt-6 flex justify-center">
+                <button id="generateBtn" onclick="startGeneration()" 
+                        class="bg-blue-600 text-white px-8 py-3 rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors">
+                    Generate MUnit Tests
+                </button>
+            </div>
+        </div>
+
+        <!-- Progress Section -->
+        <div id="progressSection" class="bg-white rounded-lg shadow-md p-6 mb-6 hidden">
+            <h2 class="text-xl font-semibold mb-4">Generation Progress</h2>
+            
+            <div class="mb-4">
+                <div class="flex justify-between text-sm text-gray-600 mb-2">
+                    <span id="progressMessage">Starting generation...</span>
+                    <span id="progressPercent">0%</span>
+                </div>
+                <div class="w-full bg-gray-200 rounded-full h-2">
+                    <div id="progressBar" class="progress-bar bg-blue-600 h-2 rounded-full" style="width: 0%"></div>
+                </div>
+            </div>
+            
+            <div id="jobInfo" class="text-sm text-gray-500">
+                <p>Job ID: <span id="jobId" class="font-mono"></span></p>
+                <p>Started: <span id="startTime"></span></p>
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="resultsSection" class="bg-white rounded-lg shadow-md p-6 hidden">
+            <h2 class="text-xl font-semibold mb-4">Generation Results</h2>
+            
+            <div id="successResults" class="hidden">
+                <div class="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+                    <div class="flex">
+                        <div class="flex-shrink-0">
+                            <svg class="h-5 w-5 text-green-400" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+                            </svg>
+                        </div>
+                        <div class="ml-3">
+                            <h3 class="text-sm font-medium text-green-800">Generation Successful!</h3>
+                            <div class="mt-2 text-sm text-green-700">
+                                <p>Generated <span id="testCount">0</span> test files</p>
+                                <p>Generation time: <span id="generationTime">0s</span></p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="mb-4">
+                    <h3 class="text-sm font-medium text-gray-700 mb-2">Generated Files:</h3>
+                    <div id="filesList" class="space-y-2"></div>
+                </div>
+                
+                <div class="flex justify-center">
+                    <button id="downloadBtn" onclick="downloadResults()" 
+                            class="bg-green-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-green-700 transition-colors">
+                        Download Test Files
+                    </button>
+                </div>
+            </div>
+            
+            <div id="errorResults" class="hidden">
+                <div class="bg-red-50 border border-red-200 rounded-lg p-4">
+                    <div class="flex">
+                        <div class="flex-shrink-0">
+                            <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+                            </svg>
+                        </div>
+                        <div class="ml-3">
+                            <h3 class="text-sm font-medium text-red-800">Generation Failed</h3>
+                            <div class="mt-2 text-sm text-red-700">
+                                <p id="errorMessage">An error occurred during generation.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let currentJobId = null;
+        let progressInterval = null;
+
+        // File handling
+        function handleDragOver(event) {
+            event.preventDefault();
+            event.currentTarget.classList.add('dragover');
+        }
+
+        function handleDragLeave(event) {
+            event.currentTarget.classList.remove('dragover');
+        }
+
+        function handleDrop(event, type) {
+            event.preventDefault();
+            event.currentTarget.classList.remove('dragover');
+            
+            const files = event.dataTransfer.files;
+            const fileInput = type === 'mule' ? document.getElementById('muleZip') : document.getElementById('docZip');
+            fileInput.files = files;
+            handleFileSelect(type);
+        }
+
+        function handleFileSelect(type) {
+            const fileInput = type === 'mule' ? document.getElementById('muleZip') : document.getElementById('docZip');
+            const fileListDiv = type === 'mule' ? document.getElementById('muleFileList') : document.getElementById('docFileList');
+            
+            fileListDiv.innerHTML = '';
+            
+            if (fileInput.files.length > 0) {
+                const file = fileInput.files[0];
+                
+                if (!file.name.toLowerCase().endsWith('.zip')) {
+                    showError(type === 'mule' ? 'Mule project must be a ZIP file' : 'Documentation must be a ZIP file');
+                    fileInput.value = '';
+                    return;
+                }
+                
+                const fileItem = document.createElement('div');
+                fileItem.className = 'file-item flex items-center justify-between bg-gray-50 p-3 rounded border';
+                fileItem.innerHTML = `
+                    <div class="flex items-center">
+                        <svg class="h-5 w-5 text-blue-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2H5a2 2 0 00-2 2z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5a2 2 0 012-2h4a2 2 0 012 2v4H8V5z" />
+                        </svg>
+                        <span class="text-sm text-gray-700">${file.name}</span>
+                        <span class="text-xs text-gray-500 ml-2">(${formatFileSize(file.size)})</span>
+                    </div>
+                    <button onclick="removeFile('${type}')" class="text-red-500 hover:text-red-700 text-sm">
+                        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                    </button>
+                `;
+                fileListDiv.appendChild(fileItem);
+            }
+        }
+
+        function removeFile(type) {
+            const fileInput = type === 'mule' ? document.getElementById('muleZip') : document.getElementById('docZip');
+            const fileListDiv = type === 'mule' ? document.getElementById('muleFileList') : document.getElementById('docFileList');
+            
+            fileInput.value = '';
+            fileListDiv.innerHTML = '';
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // Generation
+        async function startGeneration() {
+            const muleZip = document.getElementById('muleZip').files[0];
+            const docZip = document.getElementById('docZip').files[0];
+            
+            if (!muleZip) {
+                showError('Please upload a Mule project ZIP file');
+                return;
+            }
+            
+            // Disable button and show progress
+            const generateBtn = document.getElementById('generateBtn');
+            generateBtn.disabled = true;
+            generateBtn.textContent = 'Generating...';
+            
+            // Show progress section
+            document.getElementById('progressSection').classList.remove('hidden');
+            document.getElementById('resultsSection').classList.add('hidden');
+            
+            try {
+                // Create form data
+                const formData = new FormData();
+                formData.append('mule_zip', muleZip);
+                if (docZip) {
+                    formData.append('doc_zip', docZip);
+                }
+                
+                // Start generation
+                const response = await axios.post('/api/generate', formData, {
+                    headers: {
+                        'Content-Type': 'multipart/form-data'
+                    }
+                });
+                
+                if (response.data.success) {
+                    currentJobId = response.data.job_id;
+                    document.getElementById('jobId').textContent = currentJobId;
+                    document.getElementById('startTime').textContent = new Date().toLocaleString();
+                    
+                    // Start polling for progress
+                    progressInterval = setInterval(checkProgress, 1000);
+                } else {
+                    throw new Error(response.data.error);
+                }
+                
+            } catch (error) {
+                console.error('Generation error:', error);
+                showError(error.response?.data?.error || 'Failed to start generation');
+                resetUI();
+            }
+        }
+
+        async function checkProgress() {
+            if (!currentJobId) return;
+            
+            try {
+                const response = await axios.get(`/api/status/${currentJobId}`);
+                const data = response.data;
+                
+                // Update progress
+                document.getElementById('progressBar').style.width = `${data.progress}%`;
+                document.getElementById('progressPercent').textContent = `${data.progress}%`;
+                document.getElementById('progressMessage').textContent = data.message;
+                
+                if (data.status === 'completed') {
+                    clearInterval(progressInterval);
+                    showResults(data.results);
+                    resetUI();
+                } else if (data.status === 'error') {
+                    clearInterval(progressInterval);
+                    showError(data.error || 'Generation failed');
+                    resetUI();
+                }
+                
+            } catch (error) {
+                console.error('Progress check error:', error);
+                clearInterval(progressInterval);
+                showError('Failed to check generation progress');
+                resetUI();
+            }
+        }
+
+        function showResults(results) {
+            const resultsSection = document.getElementById('resultsSection');
+            const successResults = document.getElementById('successResults');
+            const errorResults = document.getElementById('errorResults');
+            
+            resultsSection.classList.remove('hidden');
+            
+            if (results.success) {
+                successResults.classList.remove('hidden');
+                errorResults.classList.add('hidden');
+                
+                document.getElementById('testCount').textContent = results.output_files.length;
+                document.getElementById('generationTime').textContent = formatTime(results.generation_time);
+                
+                // Show files list
+                const filesList = document.getElementById('filesList');
+                filesList.innerHTML = '';
+                results.output_files.forEach(file => {
+                    const fileItem = document.createElement('div');
+                    fileItem.className = 'flex items-center bg-gray-50 p-2 rounded';
+                    fileItem.innerHTML = `
+                        <svg class="h-4 w-4 text-green-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <span class="text-sm text-gray-700">${file}</span>
+                    `;
+                    filesList.appendChild(fileItem);
+                });
+                
+            } else {
+                successResults.classList.add('hidden');
+                errorResults.classList.remove('hidden');
+                document.getElementById('errorMessage').textContent = results.error;
+            }
+        }
+
+        async function downloadResults() {
+            if (!currentJobId) return;
+            
+            try {
+                const response = await axios.get(`/api/download/${currentJobId}`, {
+                    responseType: 'blob'
+                });
+                
+                // Create download link
+                const url = window.URL.createObjectURL(new Blob([response.data]));
+                const link = document.createElement('a');
+                link.href = url;
+                link.setAttribute('download', `munit_tests_${currentJobId}.zip`);
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                window.URL.revokeObjectURL(url);
+                
+            } catch (error) {
+                console.error('Download error:', error);
+                showError('Failed to download results');
+            }
+        }
+
+        function showError(message) {
+            // Create error toast
+            const toast = document.createElement('div');
+            toast.className = 'fixed top-4 right-4 bg-red-500 text-white px-6 py-3 rounded-lg shadow-lg z-50';
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            
+            // Remove after 3 seconds
+            setTimeout(() => {
+                toast.remove();
+            }, 3000);
+        }
+
+        function resetUI() {
+            const generateBtn = document.getElementById('generateBtn');
+            generateBtn.disabled = false;
+            generateBtn.textContent = 'Generate MUnit Tests';
+        }
+
+        function formatTime(seconds) {
+            if (seconds < 60) return `${seconds}s`;
+            const minutes = Math.floor(seconds / 60);
+            const remainingSeconds = seconds % 60;
+            return `${minutes}m ${remainingSeconds}s`;
+        }
+    </script>
+</body>
+</html>

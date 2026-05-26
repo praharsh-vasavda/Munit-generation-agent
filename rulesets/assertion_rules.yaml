@@ -1,0 +1,199 @@
+# Assertion Rules — v2
+# KEY CHANGE: assertions are field-specific, derived from flow output transform
+
+assertion_derivation_rules:
+  description: >
+    Never assert the whole payload with equalTo. Always assert individual fields.
+    Derive which fields to assert by reading the LAST transform:message in the flow
+    (or the set-payload before the HTTP listener response) to find output fields.
+
+  algorithm:
+    - "Find the final transform:message or set-payload in the flow"
+    - "Extract all top-level output field names"
+    - "Generate one assert-that per important field (id, status, key business fields)"
+    - "Always add a notNull() check on payload itself"
+    - "For HTTP flows, always assert attributes.statusCode"
+
+assertion_types:
+
+  happy_path:
+    required_assertions:
+      - type: "payload_not_null"
+        expression: "#[payload]"
+        matcher: "munit-tools:notNullValue()"
+        message: "Response payload must not be null"
+
+      - type: "status_code"
+        expression: "#[attributes.statusCode]"
+        matcher: "munit-tools:equalTo(200)"
+        message: "HTTP status should be 200 for success"
+        applies_to: ["http:listener flows only"]
+
+      - type: "key_fields_derived"
+        description: "Assert each top-level field from the final output transform"
+        expression_template: "#[payload.{field_name}]"
+        matcher: "munit-tools:notNullValue()"
+        message_template: "Field {field_name} must be present in response"
+        generation_rule: "derive_from_final_transform_output_fields"
+
+    optional_assertions:
+      - type: "field_value_check"
+        description: "If the test set a specific input value, assert it echoes back"
+        expression_template: "#[payload.{field_name}]"
+        matcher_template: "munit-tools:equalTo({expected_value})"
+
+  error_scenario:
+    required_assertions:
+      - type: "error_type"
+        expression: "#[error.errorType.identifier]"
+        matcher_template: "munit-tools:equalTo('{expected_error_type}')"
+        message: "Correct error type must be thrown"
+        derivation: "read from flow's error-handler on-error-propagate type attribute"
+
+      - type: "http_status_error"
+        expression: "#[attributes.statusCode]"
+        matcher: "munit-tools:greaterThanOrEqualTo(400)"
+        message: "Status code must indicate error"
+        applies_to: ["http:listener flows only"]
+
+    expected_error_mapping:
+      http_500: "HTTP:CONNECTIVITY"
+      http_404: "HTTP:NOT_FOUND"
+      http_401: "HTTP:UNAUTHORIZED"
+      db_error: "DB:CONNECTIVITY"
+      sf_error: "SALESFORCE:CONNECTIVITY"
+      validation: "MULE:EXPRESSION"
+
+  empty_payload:
+    required_assertions:
+      - type: "error_or_empty_response"
+        choose_based_on_flow:
+          if_flow_validates_input:
+            expression: "#[error.errorType.identifier]"
+            matcher: "munit-tools:notNullValue()"
+            message: "Flow should reject empty payload"
+          if_flow_handles_gracefully:
+            expression: "#[payload]"
+            matcher: "munit-tools:equalTo({})"
+            message: "Flow should return empty response for empty input"
+
+  empty_db_result:
+    required_assertions:
+      - type: "empty_array_or_404"
+        choose_based_on_flow:
+          if_flow_returns_404_on_empty:
+            expression: "#[attributes.statusCode]"
+            matcher: "munit-tools:equalTo(404)"
+          if_flow_returns_empty_array:
+            expression: "#[payload]"
+            matcher: "munit-tools:equalTo([])"
+            message: "Should return empty array when no records found"
+
+  downstream_failure:
+    required_assertions:
+      - type: "error_propagated"
+        expression: "#[error.errorType.identifier]"
+        matcher_template: "munit-tools:containsString('{connector_namespace}')"
+        message: "Connector error should propagate"
+        derivation: "use connector type namespace e.g. HTTP, DB, SALESFORCE"
+
+      - type: "http_status_502_or_500"
+        expression: "#[attributes.statusCode]"
+        matcher: "munit-tools:anyOf(munit-tools:equalTo(502), munit-tools:equalTo(500))"
+        applies_to: ["http:listener flows only"]
+
+  mq_consumer_success:
+    required_assertions:
+      - type: "processing_completed"
+        description: "Assert variables or payload set by the processing logic"
+        expression_template: "#[vars.{processing_result_var}]"
+        matcher: "munit-tools:notNullValue()"
+        derivation: "find set-variable elements in flow after the subscriber trigger"
+
+      - type: "no_error_thrown"
+        description: "Verify flow completed without error"
+        expression: "#[error]"
+        matcher: "munit-tools:nullValue()"
+
+  sftp_file_success:
+    required_assertions:
+      - type: "processing_completed"
+        expression_template: "#[vars.{result_var}]"
+        matcher: "munit-tools:notNullValue()"
+        derivation: "find set-variable or output payload in flow"
+
+  batch_success:
+    required_assertions:
+      - type: "batch_variable_check"
+        expression_template: "#[vars.{batch_result_var}]"
+        matcher: "munit-tools:notNullValue()"
+        derivation: "find variables set in batch:on-complete"
+
+  scheduler_success:
+    required_assertions:
+      - type: "execution_side_effect"
+        description: "Assert whatever the scheduler flow produces — variable, DB write mock call, MQ publish"
+        derivation: "check what verify-call mocks are in scope; assert those were called"
+        template: |
+          <munit-tools:verify-call
+              processor="{connector}::operation"
+              doc:name="Verify {connector} was called"
+              times="1"/>
+
+# XML TEMPLATES — fully correct MUnit 2.x syntax
+assertion_xml_templates:
+
+  assert_payload_not_null: |
+    <munit-tools:assert-that
+        expression="#[payload]"
+        is="#[munit-tools:notNullValue()]"
+        message="Payload must not be null"
+        doc:name="Assert payload not null"/>
+
+  assert_status_code: |
+    <munit-tools:assert-that
+        expression="#[attributes.statusCode]"
+        is="#[munit-tools:equalTo({expected_code})]"
+        message="HTTP status should be {expected_code}"
+        doc:name="Assert status {expected_code}"/>
+
+  assert_field_not_null: |
+    <munit-tools:assert-that
+        expression="#[payload.{field}]"
+        is="#[munit-tools:notNullValue()]"
+        message="Field {field} must be present"
+        doc:name="Assert {field} present"/>
+
+  assert_field_equals: |
+    <munit-tools:assert-that
+        expression="#[payload.{field}]"
+        is="#[munit-tools:equalTo({value})]"
+        message="Field {field} should equal {value}"
+        doc:name="Assert {field} equals {value}"/>
+
+  assert_error_type: |
+    <munit-tools:assert-that
+        expression="#[error.errorType.identifier]"
+        is="#[munit-tools:equalTo('{error_type}')]"
+        message="Error type should be {error_type}"
+        doc:name="Assert error type {error_type}"/>
+
+  assert_array_not_empty: |
+    <munit-tools:assert-that
+        expression="#[sizeOf(payload)]"
+        is="#[munit-tools:greaterThan(0)]"
+        message="Response array must not be empty"
+        doc:name="Assert array not empty"/>
+
+  assert_array_empty: |
+    <munit-tools:assert-that
+        expression="#[sizeOf(payload)]"
+        is="#[munit-tools:equalTo(0)]"
+        message="Response array should be empty"
+        doc:name="Assert array empty"/>
+
+  verify_connector_called: |
+    <munit-tools:verify-call
+        processor="{processor_name}"
+        doc:name="Verify {processor_name} called once"
+        times="1"/>

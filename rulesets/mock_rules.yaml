@@ -1,0 +1,239 @@
+# Mock Strategy Rules — v2
+# KEY CHANGE: payload is NEVER hardcoded. It is always derived from the 
+# DataWeave transform that immediately follows the connector in the flow.
+
+mock_derivation_rules:
+  # How to derive mock payload for any connector:
+  # 1. Find the connector in the flow XML
+  # 2. Find the NEXT transform:message or set-variable after it
+  # 3. Extract every field that transform READS from `payload` (e.g. payload.id, payload.name)
+  # 4. Build a mock object containing exactly those fields with realistic values
+  # 5. If no transform follows, check what the flow-ref caller reads after return
+  # If no downstream reads found → use minimal_safe_payload for that connector type
+
+  payload_derivation_example:
+    description: >
+      If the flow has:
+        db:select → transform (reads payload[0].customerId, payload[0].email)
+      Then mock must return:
+        '[{"customerId": "CUST-001", "email": "test@example.com"}]'
+      NOT the generic '[{"id": 1, "name": "test"}]'
+
+mock_strategies:
+
+  http:request:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"        # CHANGED: match by doc:name, not config-ref+path
+      fallback: "config-ref"     # fallback if doc:name not unique
+    payload_source: "derive_from_downstream_transform"
+    media_type: "application/json"
+    minimal_safe_payload: "{}"   # used only if derivation fails
+    attributes_to_return:        # always include HTTP attributes
+      statusCode: 200
+      headers:
+        content-type: "application/json"
+    error_scenario_overrides:
+      statusCode: 500
+      payload: '{"error": "Internal Server Error", "code": "SYSTEM_ERROR"}'
+
+  db:select:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"
+      fallback: "config-ref"
+    payload_source: "derive_from_downstream_transform"
+    result_format: "array"       # db:select always returns array — wrap derived fields in []
+    media_type: "application/java"
+    minimal_safe_payload: "[]"
+    empty_scenario_payload: "[]" # for empty-result test scenarios
+
+  db:insert:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"
+      fallback: "config-ref"
+    payload_source: "fixed"      # insert result is always affectedRows — no derivation needed
+    fixed_payload: '{"affectedRows": 1}'
+    media_type: "application/java"
+    error_scenario_payload: '{"affectedRows": 0}'
+
+  db:update:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"
+      fallback: "config-ref"
+    payload_source: "fixed"
+    fixed_payload: '{"affectedRows": 1}'
+    media_type: "application/java"
+    error_scenario_payload: '{"affectedRows": 0}'
+
+  db:delete:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"
+      fallback: "config-ref"
+    payload_source: "fixed"
+    fixed_payload: '{"affectedRows": 1}'
+    media_type: "application/java"
+
+  salesforce:query:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"
+      fallback: "config-ref"
+    payload_source: "derive_from_downstream_transform"
+    result_format: "array"
+    sf_field_prefix: "sobject."   # Salesforce fields accessed as payload[0].Name etc
+    media_type: "application/java"
+    minimal_safe_payload: "[]"
+    empty_scenario_payload: "[]"
+
+  salesforce:create:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"
+      fallback: "config-ref"
+    payload_source: "fixed"
+    fixed_payload: '{"id": "MOCK-SF-ID-001", "success": true, "errors": []}'
+    error_scenario_payload: '{"id": null, "success": false, "errors": ["FIELD_REQUIRED"]}'
+    media_type: "application/java"
+
+  salesforce:update:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"
+      fallback: "config-ref"
+    payload_source: "fixed"
+    fixed_payload: '{"success": true, "errors": []}'
+    error_scenario_payload: '{"success": false, "errors": ["INVALID_ID"]}'
+    media_type: "application/java"
+
+  anypoint-mq:publish:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"
+      fallback: "config-ref"
+    return_type: "void"
+    verification:
+      type: "munit-tools:verify-call"
+      times: 1
+      message: "MQ publish should be called exactly once"
+
+  anypoint-mq:subscriber:
+    mock_type: "munit:set-event"   # CHANGED: subscriber is a SOURCE — use set-event
+    trigger_type: "message"
+    payload_source: "derive_from_downstream_transform"
+    media_type: "application/json"
+    attributes_to_set:
+      messageId: "MSG-TEST-001"
+      destination: "derive_from_config"
+
+  kafka:consumer:
+    mock_type: "munit:set-event"
+    trigger_type: "message"
+    payload_source: "derive_from_downstream_transform"
+    media_type: "application/json"
+    attributes_to_set:
+      topic: "derive_from_config"
+      partition: 0
+      offset: 0
+
+  kafka:producer:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"
+      fallback: "config-ref"
+    return_type: "void"
+    verification:
+      type: "munit-tools:verify-call"
+      times: 1
+
+  sftp:listener:
+    mock_type: "munit:set-event"
+    trigger_type: "file"
+    payload_source: "derive_from_downstream_transform"
+    media_type: "text/plain"
+    attributes_to_set:
+      fileName: "test-input.csv"
+      directory: "/inbound"
+      size: 1024
+
+  sftp:read:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"
+      fallback: "config-ref"
+    payload_source: "derive_from_downstream_transform"
+    media_type: "text/plain"
+    minimal_safe_payload: "col1,col2\nval1,val2"
+
+  scheduler:
+    mock_type: "munit:set-event"
+    trigger_type: "scheduler"
+    payload: "#[null]"
+    attributes_to_set:
+      scheduledTime: "2024-01-01T00:00:00Z"
+
+  email:send:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"
+      fallback: "config-ref"
+    return_type: "void"
+    verification:
+      type: "munit-tools:verify-call"
+      times: 1
+      message: "Email should be sent exactly once"
+
+  transform:message:
+    mock_type: "none"
+    action: "allow_execution"
+    note: "NEVER mock DataWeave transforms — they contain the business logic being tested"
+
+  flow-ref:
+    mock_type: "conditional"
+    condition: "target_is_private_flow_or_subflow"
+    if_subflow:
+      mock_type: "none"              # CHANGED: let subflows execute by default
+      action: "allow_execution"
+      note: "Let subflows run so you test the full chain"
+    if_error_handler_flow:
+      mock_type: "none"
+      action: "allow_execution"
+    if_reusable_utility_flow:
+      mock_type: "munit-tools:mock-when"
+      payload_source: "derive_from_caller_downstream_transform"
+      note: "Only mock if the utility flow has its own outbound connectors you want to isolate"
+
+  logger:
+    mock_type: "none"               # CHANGED: never mock loggers, they have no effect on payload
+    action: "allow_execution"
+
+# DERIVATION ALGORITHM for agent to follow:
+payload_derivation_algorithm:
+  steps:
+    - step: 1
+      action: "Locate the connector element in flow XML by doc:name"
+    - step: 2
+      action: "Scan all elements AFTER it in the same flow scope"
+    - step: 3
+      action: "Find the first transform:message — extract all payload.X and payload[N].X references"
+    - step: 4
+      action: "Find all set-variable that read payload.X after this connector"
+    - step: 5
+      action: "Build mock object with those exact field names and realistic fake values"
+    - step: 6
+      action: "If connector returns array (db:select, sf:query), wrap object in []"
+    - step: 7
+      action: "If no downstream reads found, check the flow-ref CALLER's next transform"
+    - step: 8
+      action: "If still nothing found, use minimal_safe_payload from connector rule above"
+  realistic_value_rules:
+    - "String fields ending in 'Id' or 'ID': use format 'MOCK-{FIELDNAME}-001'"
+    - "String fields named 'email': use 'test@example.com'"
+    - "String fields named 'status': use 'ACTIVE'"
+    - "String fields named 'name': use 'Test {Entity}'"
+    - "Boolean fields: use true for happy path, false for error scenarios"
+    - "Date fields: use '2024-01-15T10:00:00Z'"
+    - "Number fields: use 1 for counts, 100.00 for amounts"

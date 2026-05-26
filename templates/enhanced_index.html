@@ -1,0 +1,1494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MUnit Generation Agent</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
+    <style>
+        .fade-in {
+            animation: fadeIn 0.5s ease-in;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .progress-bar {
+            transition: width 0.3s ease;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        .drop-zone {
+            transition: all 0.3s ease;
+        }
+        .drop-zone.dragover {
+            background-color: #dbeafe;
+            border-color: #3b82f6;
+            transform: scale(1.02);
+        }
+        .file-item {
+            transition: all 0.2s ease;
+        }
+        .file-item:hover {
+            transform: translateX(4px);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .enhanced-feature {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .feature-card {
+            transition: all 0.3s ease;
+        }
+        .feature-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <!-- Header -->
+    <header class="enhanced-feature text-white shadow-lg">
+        <div class="container mx-auto px-4 py-6">
+            <div>
+                <h1 class="text-3xl font-bold">MUnit Generation Agent</h1>
+                <p class="text-purple-100 mt-1">Generate MUnit test suites from Mule applications and business use cases</p>
+                <div class="flex items-center mt-2 space-x-4">
+                    <span class="bg-green-500 text-xs px-2 py-1 rounded-full">Flow Aware</span>
+                    <span class="bg-blue-500 text-xs px-2 py-1 rounded-full">Business Context</span>
+                    <span class="bg-purple-500 text-xs px-2 py-1 rounded-full">Local & GitHub Inputs</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="container mx-auto px-4 py-8">
+        <!-- Generation Form -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h2 class="text-2xl font-semibold mb-6">Generate MUnit Test Suite</h2>
+            
+            <!-- Generation Mode Toggle -->
+            <div class="mb-6 p-4 bg-gradient-to-r from-purple-50 to-blue-50 rounded-lg border border-purple-200">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="font-semibold text-purple-800">Smart Generation Mode</h3>
+                        <p class="text-sm text-purple-600">Use flow-aware analysis and business context for broader MUnit coverage</p>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="enhancedMode" class="sr-only peer" checked>
+                        <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Mule/MUnit version targeting -->
+            <div class="mb-6 p-4 bg-white rounded-lg border border-gray-200">
+                <h3 class="text-lg font-medium mb-3">Build Target (Optional)</h3>
+                <p class="text-sm text-gray-600 mb-4">
+                    Use this if your project doesn’t include a <code>pom.xml</code> in the uploaded ZIP, or if you want to force a specific Mule runtime / MUnit target for generation.
+                </p>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Mule Runtime</label>
+                        <select id="targetMuleRuntime" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500" onchange="updateMunitVersionHint()">
+                            <option value="">Auto (from pom.xml)</option>
+                            <option value="4.1">Mule 4.1.x</option>
+                            <option value="4.2">Mule 4.2.x</option>
+                            <option value="4.3">Mule 4.3.x</option>
+                            <option value="4.4">Mule 4.4.x</option>
+                            <option value="4.5">Mule 4.5.x</option>
+                            <option value="4.6">Mule 4.6.x</option>
+                            <option value="4.7">Mule 4.7.x</option>
+                            <option value="4.8">Mule 4.8.x</option>
+                            <option value="4.9">Mule 4.9.x</option>
+                            <option value="4.10">Mule 4.10+ / latest</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">MUnit Target</label>
+                        <select id="targetMunitSeries" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500" onchange="toggleCustomMunitVersion(); updateMunitVersionHint();">
+                            <option value="">Auto (from pom.xml or Mule runtime)</option>
+                            <optgroup label="MUnit 2.x — Mule 4.1–4.4">
+                              <option value="2.1.5">MUnit 2.1.5 (Mule 4.1)</option>
+                              <option value="2.2.5">MUnit 2.2.5 (Mule 4.2)</option>
+                              <option value="2.3.15">MUnit 2.3.15 (Mule 4.3–4.4)</option>
+                            </optgroup>
+                            <optgroup label="MUnit 3.x — Mule 4.5+">
+                              <option value="3.3.0">MUnit 3.3.0 (Mule 4.5)</option>
+                              <option value="3.6.0">MUnit 3.6.0 (Mule 4.6+ / latest)</option>
+                            </optgroup>
+                            <option value="custom">Custom version…</option>
+                        </select>
+                    </div>
+                    <div id="customMunitContainer" class="hidden">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Custom MUnit Version</label>
+                        <input type="text" id="customMunitVersion" placeholder="e.g. 2.3.15 or 3.6.0" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
+                        <p class="text-xs text-gray-500 mt-1">Use an exact Maven version like <code>2.3.15</code> or <code>3.6.0</code>.</p>
+                    </div>
+                </div>
+                <div id="munitVersionHint" class="mt-2 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded p-2 hidden"></div>
+            </div>
+
+            <!-- XML Source Tabs -->
+            <div class="mb-6">
+                <h3 class="text-lg font-medium mb-3">Mule XML Source</h3>
+                <div class="flex space-x-1 mb-4">
+                    <button onclick="switchTab('xml', 'local')" class="tab-btn px-4 py-2 bg-purple-500 text-white rounded-t" data-tab="xml-local">Local Upload</button>
+                    <button onclick="switchTab('xml', 'github')" class="tab-btn px-4 py-2 bg-gray-200 text-gray-700 rounded-t" data-tab="xml-github">GitHub</button>
+                </div>
+
+                <!-- Local XML Files / Project ZIP -->
+                <div id="xml-local" class="tab-content active">
+                    <div class="drop-zone border-2 border-dashed border-gray-300 rounded-lg p-6 text-center" 
+                         ondrop="handleDrop(event, 'xml')" 
+                         ondragover="handleDragOver(event)" 
+                         ondragleave="handleDragLeave(event)">
+                        <input type="file" id="xmlFile" accept=".xml,.mule,.zip,.rar,.7z" multiple class="hidden" onchange="handleFileSelect('xml')">
+                        <label for="xmlFile" class="cursor-pointer">
+                            <div class="text-gray-600">
+                                <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                </svg>
+                                <p class="mt-2">Click to upload or drag & drop Mule XML files or a project ZIP</p>
+                                <p class="text-sm text-gray-500">.xml, .mule, .zip, .rar, .7z files (multiple files supported)</p>
+                                <p class="text-xs text-purple-600 mt-1">Use this one option for individual Mule files or a full project archive</p>
+                            </div>
+                        </label>
+                        <div id="xmlFileList" class="mt-4 space-y-2"></div>
+                    </div>
+                </div>
+
+                <!-- GitHub XML -->
+                <div id="xml-github" class="tab-content">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Repository</label>
+                            <input type="text" id="githubRepo" placeholder="owner/repo-name" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Branch</label>
+                            <input type="text" id="githubBranch" value="main" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-medium text-gray-700 mb-1">File Path</label>
+                            <input type="text" id="githubFilePath" placeholder="src/main/mule/my-api.xml" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-medium text-gray-700 mb-1">GitHub Token (optional)</label>
+                            <input type="password" id="githubToken" placeholder="ghp_xxxx" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Use Case Source Tabs -->
+            <div class="mb-6">
+                <h3 class="text-lg font-medium mb-3">Business Use Case Source <span class="text-sm text-gray-500 font-normal">(Optional - enhances test scenarios)</span></h3>
+                <div class="flex space-x-1 mb-4">
+                    <button onclick="switchTab('usecase', 'local')" class="tab-btn px-4 py-2 bg-purple-500 text-white rounded-t" data-tab="usecase-local">Local Upload</button>
+                    <button onclick="switchTab('usecase', 'confluence')" class="tab-btn px-4 py-2 bg-gray-200 text-gray-700 rounded-t" data-tab="usecase-confluence">Confluence</button>
+                    <button onclick="switchTab('usecase', 'none')" class="tab-btn px-4 py-2 bg-gray-200 text-gray-700 rounded-t" data-tab="usecase-none">Skip (Use Default)</button>
+                </div>
+
+                <!-- Local Use Case Files / ZIP -->
+                <div id="usecase-local" class="tab-content active">
+                    <div class="drop-zone border-2 border-dashed border-gray-300 rounded-lg p-6 text-center"
+                         ondrop="handleDrop(event, 'usecase')" 
+                         ondragover="handleDragOver(event)" 
+                         ondragleave="handleDragLeave(event)">
+                        <input type="file" id="usecaseFile" accept=".txt,.pdf,.docx,.doc,.md,.zip,.rar,.7z" multiple class="hidden" onchange="handleFileSelect('usecase')">
+                        <label for="usecaseFile" class="cursor-pointer">
+                            <div class="text-gray-600">
+                                <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                </svg>
+                                <p class="mt-2">Click to upload or drag & drop use case documents or a ZIP folder</p>
+                                <p class="text-sm text-gray-500">.txt, .pdf, .docx, .doc, .md, .zip, .rar, .7z files (multiple files supported)</p>
+                                <p class="text-xs text-purple-600 mt-1">Use this one option for local documents or a full use case archive</p>
+                            </div>
+                        </label>
+                        <div id="usecaseFileList" class="mt-4 space-y-2"></div>
+                    </div>
+                </div>
+
+                <!-- Confluence Use Case -->
+                <div id="usecase-confluence" class="tab-content">
+                    <div class="grid grid-cols-1 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Confluence Page URL</label>
+                            <input type="url" id="confluenceUrl" placeholder="https://company.atlassian.net/wiki/spaces/XX/pages/123456" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">API Token</label>
+                                <input type="password" id="confluenceToken" placeholder="Confluence API token" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                                <input type="email" id="confluenceEmail" placeholder="your.email@company.com" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Skip Use Case -->
+                <div id="usecase-none" class="tab-content">
+                    <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                        <div class="flex">
+                            <div class="flex-shrink-0">
+                                <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                                </svg>
+                            </div>
+                            <div class="ml-3">
+                                <h3 class="text-sm font-medium text-yellow-800">Using Default Scenarios</h3>
+                                <div class="mt-2 text-sm text-yellow-700">
+                                    <p>No business use case provided. The system will generate default test scenarios based on your Mule flow type.</p>
+                                    <p class="mt-1"><strong>Smart generation:</strong> Default flow-based analysis will still be applied.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Output Options -->
+            <div class="mb-6">
+                <h3 class="text-lg font-medium mb-3">Output Options</h3>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Output Directory</label>
+                    <input type="text" id="outputPath" value="./output/" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
+                </div>
+            </div>
+
+            <div class="mb-6">
+                <div class="mb-3">
+                    <h3 class="text-lg font-medium">Flow Selection</h3>
+                    <p class="text-sm text-gray-600">The app analyzes the Mule code automatically and shows the main parent flows here.</p>
+                </div>
+                <div id="flowSelectionSection" class="hidden border border-gray-200 rounded-lg p-4 bg-gray-50">
+                    <div id="flowSelectionSummary" class="text-sm text-gray-700 mb-3"></div>
+                    <div class="mb-3">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Select Flow</label>
+                        <select id="flowSelect" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500"></select>
+                    </div>
+                    <div id="flowSelectionHint" class="text-xs text-gray-500"></div>
+                </div>
+                <div id="flowSelectionPlaceholder" class="text-sm text-gray-500 bg-gray-50 border border-dashed border-gray-300 rounded-lg p-4">
+                    Upload the Mule app and the flow dropdown will be prepared automatically.
+                </div>
+            </div>
+
+            <!-- POM Dependency Banner (blocking) -->
+            <div id="pomBanner" class="hidden mb-6"></div>
+
+            <!-- Sample Payload Section -->
+            <div class="mb-6">
+                <h3 class="text-lg font-medium mb-1">Sample Request / Response <span class="text-sm font-normal text-gray-500">(optional but strongly recommended)</span></h3>
+                <p class="text-sm text-gray-600 mb-3">
+                    Paste a real request payload and/or expected response for the selected flow.
+                    This is the same data MUnit Test Recorder captures from a live run — it
+                    produces <strong>exact field names</strong> in set-event and mock-when blocks
+                    rather than guessed values from DataWeave analysis.
+                </p>
+                <div id="samplePayloadContainer" class="hidden">
+                    <textarea id="samplePayload" rows="8"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 font-mono text-sm"
+                        placeholder='// REQUEST payload (what the flow receives):
+{
+  "customerId": "CUST-001",
+  "amount": 150.00,
+  "currency": "USD"
+}
+
+// RESPONSE payload (what the flow returns on success):
+{
+  "orderId": "ORD-2024-001",
+  "status": "ACCEPTED",
+  "message": "Order processed successfully"
+}'></textarea>
+                    <p class="text-xs text-gray-500 mt-1">
+                        Include both the request and the expected response if available.
+                        If you only have the request, the agent will infer response fields from DataWeave.
+                    </p>
+                </div>
+                <div id="samplePayloadHint" class="text-sm text-gray-500 bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <strong>💡 Tip:</strong> Select a flow above to enable the sample payload field.
+                    You can find a real sample by running the flow once in Anypoint Studio or Postman.
+                </div>
+            </div>
+
+            <!-- Generate Button -->
+            <div class="flex justify-center">
+                <button onclick="generateEnhancedMUnit()" class="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white font-bold py-3 px-8 rounded-lg transition duration-200 transform hover:scale-105 shadow-lg">
+                    <span class="flex items-center">
+                        <svg class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                        Generate MUnit Test Suite
+                    </span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Progress Section -->
+        <div id="progressSection" class="hidden bg-white rounded-lg shadow-md p-6 mb-6 fade-in">
+            <h3 class="text-xl font-semibold mb-4">Generation Progress</h3>
+            <div class="mb-4">
+                <div class="flex justify-between mb-2">
+                    <span id="progressMessage">Starting generation...</span>
+                    <span id="progressPercent">0%</span>
+                </div>
+                <div class="w-full bg-gray-200 rounded-full h-3">
+                    <div id="progressBar" class="progress-bar bg-gradient-to-r from-purple-600 to-blue-600 h-3 rounded-full" style="width: 0%"></div>
+                </div>
+            </div>
+            <div id="enhancedProgressDetails" class="mt-4 text-sm text-gray-600"></div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="resultsSection" class="hidden bg-white rounded-lg shadow-md p-6 fade-in">
+            <h3 class="text-xl font-semibold mb-4">Generation Results</h3>
+            <div id="resultsContent"></div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-gray-800 text-white py-6 mt-12">
+        <div class="container mx-auto px-4 text-center">
+            <p>MUnit Generation Agent</p>
+            <p class="text-gray-400 text-sm mt-1">Flow-aware MUnit generation for MuleSoft developers</p>
+        </div>
+    </footer>
+
+    <script>
+        let currentJobId = null;
+        let progressInterval = null;
+        let uploadedFolder = null;
+        let analyzedFlowSelection = null;
+        let analyzedBuildValidation = null;
+        let flowAnalysisInFlight = false;
+        let lastFlowAnalysisSignature = null;
+
+        // Drag and drop handlers
+        function handleDragOver(event) {
+            event.preventDefault();
+            event.currentTarget.classList.add('dragover');
+        }
+
+        function handleDragLeave(event) {
+            event.currentTarget.classList.remove('dragover');
+        }
+
+        function handleDrop(event, type) {
+            event.preventDefault();
+            event.currentTarget.classList.remove('dragover');
+            
+            const files = event.dataTransfer.files;
+            const fileInput = document.getElementById(type === 'xml' ? 'xmlFile' : 'usecaseFile');
+            
+            // Create new FileList with dropped files
+            const dataTransfer = new DataTransfer();
+            for (let file of files) {
+                dataTransfer.items.add(file);
+            }
+            fileInput.files = dataTransfer.files;
+            
+            handleFileSelect(type);
+        }
+
+        function handleFolderDrop(event) {
+            event.preventDefault();
+            event.currentTarget.classList.remove('dragover');
+            
+            const files = event.dataTransfer.files;
+            if (files.length > 0) {
+                processFolderFile(files[0]);
+            }
+        }
+
+        // Folder processing
+        function processFolderFile(file) {
+            uploadedFolder = file;
+            const folderInfo = document.getElementById('folderInfo');
+            
+            folderInfo.innerHTML = `
+                <div class="bg-green-50 border border-green-200 rounded-lg p-4">
+                    <div class="flex items-center">
+                        <svg class="h-5 w-5 text-green-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <div>
+                            <p class="font-medium text-green-800">Project folder ready</p>
+                            <p class="text-sm text-green-600">${file.name} (${formatFileSize(file.size)})</p>
+                            <p class="text-xs text-green-500 mt-1">Will be processed with project file discovery</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Folder selection handlers
+        function handleFolderSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                processFolderFile(file);
+            }
+        }
+
+        // Tab switching
+        function switchTab(type, source) {
+            // Hide all tab contents
+            document.querySelectorAll(`[id^="${type}-"]`).forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Show selected tab
+            document.getElementById(`${type}-${source}`).classList.add('active');
+            
+            // Update button styles
+            document.querySelectorAll(`[data-tab^="${type}-"]`).forEach(btn => {
+                btn.classList.remove('bg-purple-500', 'text-white');
+                btn.classList.add('bg-gray-200', 'text-gray-700');
+            });
+            
+            const activeBtn = document.querySelector(`[data-tab="${type}-${source}"]`);
+            activeBtn.classList.remove('bg-gray-200', 'text-gray-700');
+            activeBtn.classList.add('bg-purple-500', 'text-white');
+
+            if (type === 'xml') {
+                analyzedFlowSelection = null;
+                lastFlowAnalysisSignature = null;
+                document.getElementById('flowSelectionSection').classList.add('hidden');
+                document.getElementById('flowSelectionPlaceholder').classList.remove('hidden');
+                showSamplePayloadField(false);
+                document.getElementById('pomBanner').classList.add('hidden');
+                document.getElementById('pomBanner').innerHTML = '';
+                if (source === 'github') {
+                    triggerAutoFlowAnalysis();
+                } else if (document.getElementById('xmlFile').files.length > 0) {
+                    triggerAutoFlowAnalysis();
+                }
+            }
+        }
+
+        // File selection handling
+        function handleFileSelect(type) {
+            const fileInput = document.getElementById(type === 'xml' ? 'xmlFile' : 'usecaseFile');
+            
+            if (type === 'xml') {
+                const fileListDiv = document.getElementById('xmlFileList');
+                fileListDiv.innerHTML = '';
+                
+                if (fileInput.files.length > 0) {
+                    // Validate files are XML or ZIP
+                    const validFiles = [];
+                    const invalidFiles = [];
+                    
+                    for (let i = 0; i < fileInput.files.length; i++) {
+                        const file = fileInput.files[i];
+                        if (file.name.toLowerCase().endsWith('.xml') || 
+                            file.name.toLowerCase().endsWith('.zip') || 
+                            file.name.toLowerCase().endsWith('.rar') || 
+                            file.name.toLowerCase().endsWith('.7z')) {
+                            validFiles.push(file);
+                        } else {
+                            invalidFiles.push(file);
+                        }
+                    }
+                    
+                    if (invalidFiles.length > 0) {
+                        // Show warning for invalid files
+                        const warningDiv = document.createElement('div');
+                        warningDiv.className = 'bg-yellow-50 border border-yellow-200 text-yellow-800 p-3 rounded mb-2';
+                        warningDiv.innerHTML = `
+                            <div class="flex">
+                                <div class="flex-shrink-0">
+                                    <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                                    </svg>
+                                </div>
+                                <div class="ml-3">
+                                    <h3 class="text-sm font-medium text-yellow-800">Invalid Files Detected</h3>
+                                    <div class="text-sm text-yellow-700 mt-1">
+                                        The following files are not XML or ZIP and will be skipped:
+                                        <ul class="list-disc list-inside mt-1">
+                                            ${invalidFiles.map(f => `<li>${f.name}</li>`).join('')}
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        fileListDiv.appendChild(warningDiv);
+                    }
+                    
+                    if (validFiles.length > 0) {
+                        const fileCount = validFiles.length;
+                        const headerDiv = document.createElement('div');
+                        headerDiv.className = 'text-sm font-medium text-gray-700 mb-2';
+                        
+                        // Check if we have ZIP files
+                        const hasZipFiles = validFiles.some(f => f.name.toLowerCase().endsWith('.zip'));
+                        const hasXmlFiles = validFiles.some(f => f.name.toLowerCase().endsWith('.xml'));
+                        
+                        if (hasZipFiles && hasXmlFiles) {
+                            headerDiv.textContent = `Selected ${fileCount} files (XML + ZIP):`;
+                        } else if (hasZipFiles) {
+                            headerDiv.textContent = `Selected ${fileCount} project ZIP file${fileCount > 1 ? 's' : ''}:`;
+                        } else {
+                            headerDiv.textContent = `Selected ${fileCount} Mule XML file${fileCount > 1 ? 's' : ''}:`;
+                        }
+                        
+                        fileListDiv.appendChild(headerDiv);
+                        
+                        for (let i = 0; i < validFiles.length; i++) {
+                            const file = validFiles[i];
+                            const isZip = file.name.toLowerCase().endsWith('.zip');
+                            const fileItem = document.createElement('div');
+                            fileItem.className = 'file-item flex items-center justify-between bg-gray-50 p-2 rounded border';
+                            fileItem.innerHTML = `
+                                <div class="flex items-center">
+                                    <svg class="h-4 w-4 ${isZip ? 'text-purple-500' : 'text-green-500'} mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        ${isZip ? 
+                                            '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2H5a2 2 0 00-2 2z" />' :
+                                            '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />'
+                                        }
+                                    </svg>
+                                    <span class="text-sm text-gray-700">${file.name}</span>
+                                    <span class="text-xs text-gray-500 ml-2">(${formatFileSize(file.size)})</span>
+                                    ${isZip ? '<span class="text-xs text-purple-600 ml-2">Project Folder</span>' : ''}
+                                </div>
+                                <button onclick="removeXmlFile(${i})" class="text-red-500 hover:text-red-700 text-sm">
+                                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                </button>
+                            `;
+                            fileListDiv.appendChild(fileItem);
+                        }
+                    } else {
+                        const emptyDiv = document.createElement('div');
+                        emptyDiv.className = 'text-red-600 text-sm';
+                        emptyDiv.textContent = 'No valid XML or ZIP files selected. Please select .xml files or .zip project folders.';
+                        fileListDiv.appendChild(emptyDiv);
+                    }
+                }
+            } else if (type === 'usecase') {
+                const fileListDiv = document.getElementById('usecaseFileList');
+                fileListDiv.innerHTML = '';
+                
+                if (fileInput.files.length > 0) {
+                    const validFiles = [];
+                    const invalidFiles = [];
+
+                    for (let i = 0; i < fileInput.files.length; i++) {
+                        const file = fileInput.files[i];
+                        if (
+                            file.name.toLowerCase().endsWith('.txt') ||
+                            file.name.toLowerCase().endsWith('.pdf') ||
+                            file.name.toLowerCase().endsWith('.docx') ||
+                            file.name.toLowerCase().endsWith('.doc') ||
+                            file.name.toLowerCase().endsWith('.md') ||
+                            file.name.toLowerCase().endsWith('.zip') ||
+                            file.name.toLowerCase().endsWith('.rar') ||
+                            file.name.toLowerCase().endsWith('.7z')
+                        ) {
+                            validFiles.push(file);
+                        } else {
+                            invalidFiles.push(file);
+                        }
+                    }
+
+                    if (invalidFiles.length > 0) {
+                        const warningDiv = document.createElement('div');
+                        warningDiv.className = 'bg-yellow-50 border border-yellow-200 text-yellow-800 p-3 rounded mb-2';
+                        warningDiv.innerHTML = `
+                            <div class="text-sm">
+                                Unsupported files will be skipped:
+                                <ul class="list-disc list-inside mt-1">
+                                    ${invalidFiles.map(f => `<li>${f.name}</li>`).join('')}
+                                </ul>
+                            </div>
+                        `;
+                        fileListDiv.appendChild(warningDiv);
+                    }
+
+                    if (validFiles.length === 0) {
+                        const emptyDiv = document.createElement('div');
+                        emptyDiv.className = 'text-red-600 text-sm';
+                        emptyDiv.textContent = 'No valid use case files selected. Please select documents or ZIP folders.';
+                        fileListDiv.appendChild(emptyDiv);
+                        return;
+                    }
+
+                    const fileCount = validFiles.length;
+                    const headerDiv = document.createElement('div');
+                    headerDiv.className = 'text-sm font-medium text-gray-700 mb-2';
+                    const hasArchives = validFiles.some(file =>
+                        file.name.toLowerCase().endsWith('.zip') ||
+                        file.name.toLowerCase().endsWith('.rar') ||
+                        file.name.toLowerCase().endsWith('.7z')
+                    );
+                    headerDiv.textContent = hasArchives
+                        ? `Selected ${fileCount} use case upload${fileCount > 1 ? 's' : ''} (documents + archives):`
+                        : `Selected ${fileCount} file${fileCount > 1 ? 's' : ''}:`;
+                    fileListDiv.appendChild(headerDiv);
+                    
+                    for (let i = 0; i < validFiles.length; i++) {
+                        const file = validFiles[i];
+                        const isArchive = file.name.toLowerCase().endsWith('.zip') ||
+                            file.name.toLowerCase().endsWith('.rar') ||
+                            file.name.toLowerCase().endsWith('.7z');
+                        const fileItem = document.createElement('div');
+                        fileItem.className = 'file-item flex items-center justify-between bg-gray-50 p-2 rounded border';
+                        fileItem.innerHTML = `
+                            <div class="flex items-center">
+                                <svg class="h-4 w-4 text-blue-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                </svg>
+                                <span class="text-sm text-gray-700">${file.name}</span>
+                                <span class="text-xs text-gray-500 ml-2">(${formatFileSize(file.size)})</span>
+                                ${isArchive ? '<span class="text-xs text-blue-600 ml-2">ZIP Folder</span>' : ''}
+                            </div>
+                            <button onclick="removeUsecaseFile(${i})" class="text-red-500 hover:text-red-700 text-sm">
+                                <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        `;
+                        fileListDiv.appendChild(fileItem);
+                    }
+                }
+            }
+
+            if (type === 'xml') {
+                lastFlowAnalysisSignature = null;
+                triggerAutoFlowAnalysis();
+            }
+        }
+        
+        // Format file size
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        // Remove file functions
+        function removeUsecaseFile(index) {
+            const fileInput = document.getElementById('usecaseFile');
+            const dt = new DataTransfer();
+            
+            for (let i = 0; i < fileInput.files.length; i++) {
+                if (i !== index) {
+                    dt.items.add(fileInput.files[i]);
+                }
+            }
+            
+            fileInput.files = dt.files;
+            handleFileSelect('usecase');
+        }
+        
+        function removeXmlFile(index) {
+            const fileInput = document.getElementById('xmlFile');
+            const dt = new DataTransfer();
+            
+            for (let i = 0; i < fileInput.files.length; i++) {
+                if (i !== index) {
+                    dt.items.add(fileInput.files[i]);
+                }
+            }
+            
+            fileInput.files = dt.files;
+            handleFileSelect('xml');
+        }
+
+        async function analyzeFlows() {
+            try {
+                if (!canAnalyzeFlows()) {
+                    return;
+                }
+
+                flowAnalysisInFlight = true;
+                setFlowSelectionLoadingState('Analyzing Mule flows automatically...');
+                const formData = buildGenerationFormData(false);
+                const response = await axios.post('/api/enhanced/analyze-flows', formData, {
+                    headers: { 'Content-Type': 'multipart/form-data' }
+                });
+
+                if (!response.data.success) {
+                    flowAnalysisInFlight = false;
+                    showError(response.data.error || 'Failed to analyze flows');
+                    return;
+                }
+
+                analyzedFlowSelection = response.data.selection;
+                analyzedBuildValidation = response.data.build_validation || null;
+                lastFlowAnalysisSignature = getFlowAnalysisSignature();
+                renderFlowSelection(response.data.selection, analyzedBuildValidation);
+                renderPomBanner(analyzedBuildValidation);
+                showSamplePayloadField(true);
+                flowAnalysisInFlight = false;
+            } catch (error) {
+                flowAnalysisInFlight = false;
+                showError('Failed to analyze flows: ' + (error.response?.data?.error || error.message));
+            }
+        }
+
+        function triggerAutoFlowAnalysis() {
+            analyzedFlowSelection = null;
+            analyzedBuildValidation = null;
+            const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
+            const signature = getFlowAnalysisSignature();
+            if (!signature || signature === lastFlowAnalysisSignature) {
+                return;
+            }
+            if (xmlSource === 'local' && document.getElementById('xmlFile').files.length > 0) {
+                analyzeFlows();
+            } else if (xmlSource === 'github' && canAnalyzeFlows()) {
+                analyzeFlows();
+            }
+        }
+
+        function getFlowAnalysisSignature() {
+            const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
+            if (xmlSource === 'local') {
+                const xmlFiles = Array.from(document.getElementById('xmlFile').files || []);
+                if (!xmlFiles.length) return '';
+                return xmlFiles.map(file => `${file.name}:${file.size}:${file.lastModified}`).join('|');
+            }
+            const repo = document.getElementById('githubRepo').value || '';
+            const branch = document.getElementById('githubBranch').value || '';
+            const path = document.getElementById('githubFilePath').value || '';
+            return [repo, branch, path].join('|');
+        }
+
+        function canAnalyzeFlows() {
+            const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
+            if (flowAnalysisInFlight) {
+                return false;
+            }
+            if (xmlSource === 'local') {
+                return document.getElementById('xmlFile').files.length > 0;
+            }
+            return Boolean(document.getElementById('githubRepo').value && document.getElementById('githubFilePath').value);
+        }
+
+        function renderFlowSelection(selection, buildValidation = null) {
+            const section = document.getElementById('flowSelectionSection');
+            const summary = document.getElementById('flowSelectionSummary');
+            const flowSelect = document.getElementById('flowSelect');
+            const hint = document.getElementById('flowSelectionHint');
+            const placeholder = document.getElementById('flowSelectionPlaceholder');
+
+            section.classList.remove('hidden');
+            placeholder.classList.add('hidden');
+            summary.innerHTML = `
+                <strong>Job Type:</strong> ${selection.job_type || 'N/A'}<br>
+                <strong>Available Parent Flows:</strong> ${selection.recommended_flows.length || selection.all_flows.length}
+                ${generateBuildValidationSummary(buildValidation)}
+            `;
+
+            const flowOptions = selection.recommended_flows.length ? selection.recommended_flows : selection.all_flows;
+            flowSelect.innerHTML = flowOptions.map(flow => `
+                <option value="${escapeHtml(flow.name)}">${escapeHtml(flow.display_name || flow.name)}</option>
+            `).join('');
+
+            const selectedFlow = flowOptions[0];
+            hint.textContent = selectedFlow
+                ? `${selectedFlow.selection_reason || ''} Child flows referenced by this parent flow will be included automatically.`
+                : 'No selectable parent flows were found.';
+            flowSelect.onchange = updateFlowSelectionHint;
+        }
+
+        function generateBuildValidationSummary(buildValidation) {
+            if (!buildValidation || !buildValidation.has_pom) {
+                return '<br><span class="text-amber-700"><strong>POM Check:</strong> pom.xml not found in upload, MUnit dependencies could not be verified.</span>';
+            }
+            const status = buildValidation.status === 'ready'
+                ? '<span class="text-green-700">Ready</span>'
+                : '<span class="text-amber-700">Needs attention</span>';
+            const warnings = buildValidation.warnings || [];
+            const latest = buildValidation.latest_lookup_status === 'resolved'
+                ? ` Latest stable: MUnit ${buildValidation.latest_munit_version || 'unknown'}, plugin ${buildValidation.latest_munit_plugin_version || 'unknown'}.`
+                : '';
+            const recommended = buildValidation.recommended_munit_version
+                ? ` Recommended for this project: MUnit ${buildValidation.recommended_munit_version}${buildValidation.mule_runtime_version ? ` (Mule ${buildValidation.mule_runtime_version})` : ''}.`
+                : '';
+            return `
+                <br><strong>POM Check:</strong> ${status}
+                ${recommended ? `<br><span class="text-gray-700">${escapeHtml(recommended)}</span>` : ''}
+                ${latest ? `<br><span class="text-gray-700">${escapeHtml(latest)}</span>` : ''}
+                ${warnings.length ? `<br><span class="text-amber-700">${warnings.map(escapeHtml).join('<br>')}</span>` : ''}
+            `;
+        }
+
+        function getSelectedFlows() {
+            const flowSelect = document.getElementById('flowSelect');
+            return flowSelect && flowSelect.value ? [flowSelect.value] : [];
+        }
+
+        function updateFlowSelectionHint() {
+            if (!analyzedFlowSelection) return;
+            const flowSelect = document.getElementById('flowSelect');
+            const hint = document.getElementById('flowSelectionHint');
+            const options = analyzedFlowSelection.recommended_flows.length
+                ? analyzedFlowSelection.recommended_flows
+                : analyzedFlowSelection.all_flows;
+            const flow = options.find(item => item.name === flowSelect.value);
+            if (!flow) return;
+            hint.textContent = `${flow.selection_reason || ''} ${flow.child_flows.length ? `Included child flows: ${flow.child_flows.join(', ')}.` : 'No child flows linked to this parent flow.'}`;
+        }
+
+        function setFlowSelectionLoadingState(message) {
+            const section = document.getElementById('flowSelectionSection');
+            const summary = document.getElementById('flowSelectionSummary');
+            const placeholder = document.getElementById('flowSelectionPlaceholder');
+            section.classList.remove('hidden');
+            placeholder.classList.add('hidden');
+            summary.textContent = message;
+            document.getElementById('flowSelect').innerHTML = '<option>Loading flows...</option>';
+            document.getElementById('flowSelectionHint').textContent = '';
+        }
+
+        function buildGenerationFormData(includeSelectedFlows = true) {
+            const formData = new FormData();
+            const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
+            const usecaseSource = document.querySelector('#usecase-local.active') ? 'local' : 
+                                 document.querySelector('#usecase-confluence.active') ? 'confluence' : 'none';
+
+            formData.append('enhanced_mode', document.getElementById('enhancedMode').checked);
+            formData.append('xml_source', xmlSource);
+            formData.append('output_path', document.getElementById('outputPath').value);
+            formData.append('target_mule_runtime', document.getElementById('targetMuleRuntime')?.value || '');
+            formData.append('target_munit_series', document.getElementById('targetMunitSeries')?.value || '');
+            formData.append('target_munit_custom', document.getElementById('customMunitVersion')?.value || '');
+
+            if (xmlSource === 'local') {
+                const xmlFiles = document.getElementById('xmlFile').files;
+                for (let i = 0; i < xmlFiles.length; i++) {
+                    formData.append('xml_file', xmlFiles[i]);
+                }
+            } else {
+                formData.append('github_repo', document.getElementById('githubRepo').value);
+                formData.append('github_branch', document.getElementById('githubBranch').value);
+                formData.append('github_file_path', document.getElementById('githubFilePath').value);
+                formData.append('github_token', document.getElementById('githubToken').value);
+            }
+
+            if (usecaseSource === 'local') {
+                const usecaseFiles = document.getElementById('usecaseFile').files;
+                for (let i = 0; i < usecaseFiles.length; i++) {
+                    formData.append('usecase_file', usecaseFiles[i]);
+                }
+            } else if (usecaseSource === 'confluence') {
+                formData.append('confluence_url', document.getElementById('confluenceUrl').value);
+                formData.append('confluence_token', document.getElementById('confluenceToken').value);
+                formData.append('confluence_email', document.getElementById('confluenceEmail').value);
+            }
+
+            if (includeSelectedFlows) {
+                formData.append('selected_flows', JSON.stringify(getSelectedFlows()));
+                // Include sample payload if provided
+                const samplePayload = document.getElementById('samplePayload');
+                if (samplePayload && samplePayload.value.trim()) {
+                    formData.append('sample_payload', samplePayload.value.trim());
+                }
+            }
+
+            return formData;
+        }
+
+        // Client-side version compatibility map (mirrors MULE_RUNTIME_MUNIT_VERSIONS in app.py)
+        const MULE_MUNIT_COMPAT = {
+            '4.1': '2.1.5',  '4.2': '2.2.5',
+            '4.3': '2.3.15', '4.4': '2.3.15',
+            '4.5': '3.3.0',  '4.6': '3.6.0',
+            '4.7': '3.6.0',  '4.8': '3.6.0',
+        };
+
+        function toggleCustomMunitVersion() {
+            const selector = document.getElementById('targetMunitSeries');
+            const container = document.getElementById('customMunitContainer');
+            if (!selector || !container) return;
+            const isCustom = selector.value === 'custom';
+            if (isCustom) {
+                container.classList.remove('hidden');
+            } else {
+                container.classList.add('hidden');
+                const input = document.getElementById('customMunitVersion');
+                if (input) input.value = '';
+            }
+        }
+
+        function updateMunitVersionHint() {
+            const hint = document.getElementById('munitVersionHint');
+            if (!hint) return;
+            const munitSel = document.getElementById('targetMunitSeries');
+            const muleSel  = document.getElementById('targetMuleRuntime');
+            const selected = munitSel && munitSel.value;
+            const muleVer  = muleSel  && muleSel.value;
+
+            // Auto mode: show what we'd recommend from the Mule runtime
+            if (!selected || selected === 'custom') {
+                if (muleVer && MULE_MUNIT_COMPAT[muleVer]) {
+                    hint.textContent = `Auto will use MUnit ${MULE_MUNIT_COMPAT[muleVer]} for Mule ${muleVer}.`;
+                    hint.classList.remove('hidden');
+                } else {
+                    hint.classList.add('hidden');
+                }
+                return;
+            }
+
+            // Warn if user picks MUnit 3.x for a Mule < 4.5 runtime
+            const isMunit3 = selected.startsWith('3');
+            const muleMinor = muleVer ? parseFloat(muleVer) : null;
+            if (isMunit3 && muleMinor && muleMinor < 4.5) {
+                hint.textContent = `⚠ MUnit 3.x is NOT compatible with Mule ${muleVer}. Use MUnit 2.3.15 for Mule 4.3–4.4.`;
+                hint.className = 'mt-2 text-xs text-red-700 bg-red-50 border border-red-300 rounded p-2';
+                hint.classList.remove('hidden');
+            } else if (!isMunit3 && muleMinor && muleMinor >= 4.5) {
+                hint.textContent = `ℹ MUnit 2.x works on Mule ${muleVer} but MUnit 3.x is recommended for better features.`;
+                hint.className = 'mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-300 rounded p-2';
+                hint.classList.remove('hidden');
+            } else {
+                hint.classList.add('hidden');
+                hint.className = 'mt-2 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded p-2 hidden';
+            }
+        }
+
+        // ── Sample Payload helpers ────────────────────────────────────────────
+        function showSamplePayloadField(visible) {
+            const container = document.getElementById('samplePayloadContainer');
+            const hint = document.getElementById('samplePayloadHint');
+            if (!container || !hint) return;
+            if (visible) {
+                container.classList.remove('hidden');
+                hint.classList.add('hidden');
+            } else {
+                container.classList.add('hidden');
+                hint.classList.remove('hidden');
+                document.getElementById('samplePayload').value = '';
+            }
+        }
+
+        // ── POM dependency banner ─────────────────────────────────────────────
+        // Shows BEFORE the generate button. If critical deps are missing the
+        // banner displays copy-ready POM snippets and disables the button.
+        function renderPomBanner(buildValidation) {
+            const banner = document.getElementById('pomBanner');
+            if (!banner) return;
+            if (!buildValidation || !buildValidation.has_pom) {
+                banner.classList.remove('hidden');
+                banner.innerHTML = `
+                    <div class="bg-amber-50 border border-amber-300 rounded-lg p-4">
+                        <div class="flex items-start">
+                            <svg class="h-5 w-5 text-amber-500 mt-0.5 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+                            </svg>
+                            <div>
+                                <p class="font-semibold text-amber-800">pom.xml not detected</p>
+                                <p class="text-sm text-amber-700 mt-1">
+                                    Upload a full Mule project ZIP to enable MUnit dependency checking.
+                                    Without a pom.xml the generated tests may not compile.
+                                </p>
+                            </div>
+                        </div>
+                    </div>`;
+                return;
+            }
+
+            const missing = [...(buildValidation.missing_dependencies || []), ...(buildValidation.missing_plugins || [])];
+            const snippets = buildValidation.recommended_snippets || [];
+            const isReady = buildValidation.status === 'ready';
+            const munitVersion = buildValidation.recommended_munit_version || buildValidation.munit_version || '3.6.0';
+            const pluginVersion = buildValidation.munit_plugin_version || buildValidation.recommended_munit_version || munitVersion;
+            const lookupOk = buildValidation.latest_lookup_status === 'resolved';
+
+            if (isReady) {
+                banner.classList.remove('hidden');
+                banner.innerHTML = `
+                    <div class="bg-green-50 border border-green-300 rounded-lg p-4 flex items-center">
+                        <svg class="h-5 w-5 text-green-500 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                        </svg>
+                        <div>
+                            <span class="font-semibold text-green-800">pom.xml ready</span>
+                            <span class="text-sm text-green-700 ml-2">
+                                munit-runner ✓ &nbsp; munit-tools ✓ &nbsp; munit-maven-plugin ✓
+                                ${buildValidation.mule_runtime_version ? `&nbsp;|&nbsp; Mule <strong>${escapeHtml(buildValidation.mule_runtime_version)}</strong>` : ''}
+                                &nbsp;|&nbsp; Recommended MUnit <strong>${escapeHtml(munitVersion)}</strong>, plugin <strong>${escapeHtml(pluginVersion)}</strong>
+                            </span>
+                        </div>
+                    </div>`;
+                return;
+            }
+
+            // Missing deps — show blocking warning with copy-ready snippets
+            const snippetHtml = snippets.map(s => `
+                <div class="mt-3">
+                    <p class="text-sm font-semibold text-red-800 mb-1">${escapeHtml(s.title)}</p>
+                    <div class="relative">
+                        <pre class="bg-gray-900 text-green-300 text-xs p-3 rounded overflow-x-auto">${escapeHtml(s.xml)}</pre>
+                        <button onclick="copySnippet(this)" data-snippet="${escapeHtml(s.xml)}"
+                            class="absolute top-2 right-2 bg-gray-700 hover:bg-gray-600 text-white text-xs px-2 py-1 rounded">
+                            Copy
+                        </button>
+                    </div>
+                </div>`).join('');
+
+            banner.classList.remove('hidden');
+            banner.innerHTML = `
+                <div class="bg-red-50 border-2 border-red-400 rounded-lg p-4">
+                    <div class="flex items-start mb-3">
+                        <svg class="h-6 w-6 text-red-500 mt-0.5 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                        </svg>
+                        <div>
+                            <p class="font-bold text-red-800 text-base">MUnit dependencies missing in pom.xml</p>
+                            <p class="text-sm text-red-700 mt-1">
+                                The generated MUnit files will <strong>not compile or run</strong> until these are added.
+                                Copy the snippets below into your <code>pom.xml</code> before running
+                                <code>mvn test</code>.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-3 gap-3 text-sm mb-3">
+                        <div class="flex items-center gap-1">
+                            ${buildValidation.munit_runner_dependency_present
+                                ? '<span class="text-green-700">✓</span> munit-runner'
+                                : '<span class="text-red-600 font-bold">✗</span> munit-runner <span class="text-red-600 text-xs">(MISSING)</span>'}
+                        </div>
+                        <div class="flex items-center gap-1">
+                            ${buildValidation.munit_tools_dependency_present
+                                ? '<span class="text-green-700">✓</span> munit-tools'
+                                : '<span class="text-red-600 font-bold">✗</span> munit-tools <span class="text-red-600 text-xs">(MISSING)</span>'}
+                        </div>
+                        <div class="flex items-center gap-1">
+                            ${buildValidation.munit_plugin_present
+                                ? '<span class="text-green-700">✓</span> munit-maven-plugin'
+                                : '<span class="text-red-600 font-bold">✗</span> munit-maven-plugin <span class="text-red-600 text-xs">(MISSING)</span>'}
+                        </div>
+                    </div>
+                    <p class="text-xs text-gray-600 mb-2">Recommended for this project: MUnit <strong>${escapeHtml(munitVersion)}</strong>, plugin <strong>${escapeHtml(pluginVersion)}</strong>${buildValidation.mule_runtime_version ? ` (Mule runtime ${escapeHtml(buildValidation.mule_runtime_version)})` : ''}</p>
+                    ${snippetHtml}
+                    <p class="text-xs text-red-700 mt-3 font-semibold">
+                        ⚠ You can still generate the MUnit file, but add these to pom.xml first or the tests will not compile.
+                    </p>
+                </div>`;
+        }
+
+        function copySnippet(btn) {
+            const text = btn.getAttribute('data-snippet');
+            navigator.clipboard.writeText(text).then(() => {
+                const orig = btn.textContent;
+                btn.textContent = 'Copied!';
+                btn.classList.add('bg-green-600');
+                setTimeout(() => { btn.textContent = orig; btn.classList.remove('bg-green-600'); }, 1500);
+            });
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        // MUnit generation
+        async function generateEnhancedMUnit() {
+            try {
+                if (!validateEnhancedInputs()) {
+                    return;
+                }
+
+                // Show progress
+                document.getElementById('progressSection').classList.remove('hidden');
+                document.getElementById('resultsSection').classList.add('hidden');
+
+                const formData = buildGenerationFormData(true);
+
+                // Start generation
+                const response = await axios.post('/api/enhanced/generate', formData, {
+                    headers: {
+                        'Content-Type': 'multipart/form-data'
+                    }
+                });
+
+                if (response.data.success) {
+                    currentJobId = response.data.job_id;
+                    startEnhancedProgressTracking();
+                } else {
+                    showError(response.data.error);
+                }
+
+            } catch (error) {
+                showError('Failed to start enhanced generation: ' + error.message);
+            }
+        }
+
+        // Progress tracking
+        function startEnhancedProgressTracking() {
+            progressInterval = setInterval(async () => {
+                try {
+                    const response = await axios.get(`/api/job-status/${currentJobId}`);
+                    const status = response.data;
+
+                    // Update progress
+                    document.getElementById('progressBar').style.width = `${status.progress}%`;
+                    document.getElementById('progressPercent').textContent = `${status.progress}%`;
+                    document.getElementById('progressMessage').textContent = status.message;
+
+                    // Update generation details
+                    const enhancedDetails = document.getElementById('enhancedProgressDetails');
+                    enhancedDetails.innerHTML = `
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <span class="font-medium">Smart Mode:</span> 
+                                <span class="text-purple-600">${document.getElementById('enhancedMode').checked ? 'Active' : 'Disabled'}</span>
+                            </div>
+                            <div>
+                                <span class="font-medium">Optimization:</span> 
+                                <span class="text-blue-600">balanced</span>
+                            </div>
+                        </div>
+                    `;
+
+                    // Check if complete
+                    if (status.status === 'error') {
+                        clearInterval(progressInterval);
+                        showError(status.message);
+                    } else if (status.progress === 100) {
+                        clearInterval(progressInterval);
+                        showEnhancedResults();
+                    }
+                } catch (error) {
+                    clearInterval(progressInterval);
+                    showError('Failed to track progress: ' + error.message);
+                }
+            }, 1000);
+        }
+
+        // Show results
+        async function showEnhancedResults() {
+            try {
+                const response = await axios.get(`/api/job-result/${currentJobId}`);
+                const result = response.data;
+
+                document.getElementById('progressSection').classList.add('hidden');
+                document.getElementById('resultsSection').classList.remove('hidden');
+
+                if (result.success) {
+                    const resultsHTML = `
+                        <div class="space-y-4">
+                            ${result.mode === 'enhanced' ? generateEnhancedResultsHTML(result) : generateLegacyResultsHTML(result)}
+                        </div>
+                    `;
+                    document.getElementById('resultsContent').innerHTML = resultsHTML;
+                } else {
+                    document.getElementById('resultsContent').innerHTML = `
+                        <div class="bg-red-50 p-4 rounded-lg border border-red-200">
+                            <h4 class="font-semibold text-red-800 mb-2">Generation Failed</h4>
+                            <p class="text-red-600">${result.error}</p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                showError('Failed to get results: ' + error.message);
+            }
+        }
+
+        function generateEnhancedResultsHTML(result) {
+            const buildValidationHTML = result.build_validation ? generateBuildValidationHTML(result.build_validation) : '';
+            let html = `
+                <div class="bg-gradient-to-r from-purple-50 to-blue-50 p-4 rounded-lg border border-purple-200">
+                    <h4 class="font-semibold text-purple-800 mb-2">MUnit generation completed successfully</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
+            `;
+            
+            // Basic results
+            html += `
+                <div><strong>Mode:</strong> Smart</div>
+                <div><strong>Output Files:</strong> ${result.output_files ? result.output_files.length : 1}</div>
+                <div><strong>Generation Time:</strong> ${result.generation_time ? result.generation_time.toFixed(2) : 'N/A'}s</div>
+            `;
+            
+            // Token usage
+            if (result.token_usage) {
+                html += `
+                    <div><strong>Token Budget:</strong> ${result.token_usage.budget?.toLocaleString() || 'N/A'}</div>
+                    <div><strong>Tokens Used:</strong> ${result.token_usage.used?.toLocaleString() || 'N/A'}</div>
+                    <div><strong>Usage:</strong> ${result.token_usage.used && result.token_usage.budget ? 
+                        ((result.token_usage.used / result.token_usage.budget) * 100).toFixed(1) : 'N/A'}%</div>
+                `;
+            }
+
+            // Security status
+            if (result.security_validation) {
+                html += `
+                    <div><strong>Security:</strong> <span class="text-green-600">${result.security_validation.status || 'Unknown'}</span></div>
+                    <div><strong>Issues:</strong> ${result.security_validation.issues?.length || 0}</div>
+                `;
+            }
+            
+            // Optimization
+            if (result.optimization_validation) {
+                html += `
+                    <div><strong>Optimization:</strong> <span class="text-blue-600">${result.optimization_validation.status || 'Unknown'}</span></div>
+                    <div><strong>Savings:</strong> ${result.optimization_validation.savings_percentage?.toFixed(1) || 'N/A'}%</div>
+                `;
+            }
+            
+            html += `
+                    </div>
+                </div>
+
+                ${buildValidationHTML}
+                
+                <!-- Generated Files -->
+                ${result.output_files && result.output_files.length > 0 ? generateOutputFilesHTML(result.output_files) : ''}
+                
+                <!-- Download Section -->
+                <div class="flex justify-center space-x-4">
+                    <a href="/api/download/${currentJobId}" class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-6 rounded-lg transition">
+                        Download Test Files
+                    </a>
+                    <button onclick="downloadEnhancedReports()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg transition">
+                        Download Reports
+                    </button>
+                </div>
+            `;
+            
+            return html;
+        }
+
+        function generateLegacyResultsHTML(result) {
+            return `
+                <div class="bg-green-50 p-4 rounded-lg border border-green-200">
+                    <h4 class="font-semibold text-green-800 mb-2">Generation Successful!</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                        <div><strong>Mode:</strong> Legacy</div>
+                        <div><strong>Output File:</strong> ${result.output_file}</div>
+                        <div><strong>Job Type:</strong> ${result.flow_summary?.job_type || 'N/A'}</div>
+                        <div><strong>Main Flow:</strong> ${result.flow_summary?.flows?.[0] || 'N/A'}</div>
+                        <div><strong>Scenarios:</strong> ${result.scenarios_count || 0}</div>
+                        <div><strong>Generation Time:</strong> ${result.generation_time?.toFixed(2) || 'N/A'}s</div>
+                    </div>
+                    ${result.build_validation ? generateBuildValidationHTML(result.build_validation) : ''}
+                    <div class="flex justify-center mt-4">
+                        <a href="/api/download/${currentJobId}" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-lg transition">
+                            Download MUnit File
+                        </a>
+                    </div>
+                </div>
+            `;
+        }
+
+        function generateBuildValidationHTML(buildValidation) {
+            const warnings = buildValidation.warnings || [];
+            const snippets = buildValidation.recommended_snippets || [];
+            const ready = buildValidation.status === 'ready';
+            const lookupResolved = buildValidation.latest_lookup_status === 'resolved';
+            return `
+                <div class="${ready ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'} p-4 rounded-lg border mt-4">
+                    <h4 class="font-semibold ${ready ? 'text-green-800' : 'text-amber-800'} mb-2">pom.xml MUnit Readiness</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm mb-3">
+                        <div><strong>munit-runner:</strong> ${buildValidation.munit_runner_dependency_present ? 'Present' : 'Missing'}</div>
+                        <div><strong>munit-tools:</strong> ${buildValidation.munit_tools_dependency_present ? 'Present' : 'Missing'}</div>
+                        <div><strong>munit-maven-plugin:</strong> ${buildValidation.munit_plugin_present ? 'Present' : 'Missing'}</div>
+                    </div>
+                    <div class="text-sm text-gray-700 mb-3">
+                        <strong>Recommended versions:</strong> MUnit ${escapeHtml(buildValidation.recommended_munit_version || buildValidation.munit_version || '3.6.0')}${buildValidation.mule_runtime_version ? ` for Mule ${escapeHtml(buildValidation.mule_runtime_version)}` : ''}
+                        ${lookupResolved ? `<br><strong>Latest stable lookup:</strong> MUnit ${escapeHtml(buildValidation.latest_munit_version || 'unknown')} and plugin ${escapeHtml(buildValidation.latest_munit_plugin_version || 'unknown')}` : ''}
+                    </div>
+                    ${warnings.length ? `<ul class="list-disc list-inside text-sm text-amber-800 mb-3">${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul>` : '<div class="text-sm text-green-700">Required MUnit dependencies and plugin were detected.</div>'}
+                    ${snippets.map(snippet => `
+                        <div class="mt-3">
+                            <div class="text-sm font-medium text-gray-800 mb-1">${escapeHtml(snippet.title)}</div>
+                            <pre class="bg-gray-900 text-gray-100 text-xs p-3 rounded overflow-x-auto">${escapeHtml(snippet.xml)}</pre>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        function generateOutputFilesHTML(outputFiles) {
+            let html = `
+                <div class="bg-white p-4 rounded-lg border">
+                    <h4 class="font-semibold text-gray-800 mb-3">Generated MUnit Files</h4>
+                    <div class="space-y-2 max-h-60 overflow-y-auto">
+            `;
+            
+            outputFiles.forEach(filePath => {
+                const fileName = filePath.split('\\').pop().split('/').pop(); // Extract filename
+                html += `
+                    <div class="bg-gray-50 p-3 rounded border flex items-center justify-between">
+                        <div>
+                            <div class="font-medium text-gray-800">${fileName}</div>
+                            <div class="text-sm text-gray-600">MUnit Test Suite</div>
+                        </div>
+                        <div class="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">
+                            Generated
+                        </div>
+                    </div>
+                `;
+            });
+            
+            html += `
+                    </div>
+                </div>
+            `;
+            
+            return html;
+        }
+
+        function generateTestSuitesHTML(testSuites) {
+            let html = `
+                <div class="bg-white p-4 rounded-lg border">
+                    <h4 class="font-semibold text-gray-800 mb-3">Generated Test Suites</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            `;
+            
+            for (const [suiteType, suiteData] of Object.entries(testSuites)) {
+                const testCount = suiteData.tests?.length || 0;
+                const features = [];
+                
+                if (suiteData.business_context_applied) features.push('Business Context');
+                if (suiteType.includes('security')) features.push('Security');
+                if (suiteType.includes('fault')) features.push('Fault Tolerance');
+                
+                html += `
+                    <div class="bg-gray-50 p-3 rounded border">
+                        <div class="font-medium text-gray-800">${suiteType.replace('_', ' ').title()}</div>
+                        <div class="text-sm text-gray-600">${testCount} tests</div>
+                        ${features.length > 0 ? `
+                            <div class="text-xs text-purple-600 mt-1">
+                                ${features.join(' • ')}
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            }
+            
+            html += `
+                    </div>
+                </div>
+            `;
+            
+            return html;
+        }
+
+        function downloadEnhancedReports() {
+            // Download reports generated by the smart analysis pipeline
+            window.open(`/api/download/${currentJobId}/reports`, '_blank');
+        }
+
+        // Input validation
+        function validateEnhancedInputs() {
+            const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
+            const usecaseSource = document.querySelector('#usecase-local.active') ? 'local' : 
+                                 document.querySelector('#usecase-confluence.active') ? 'confluence' : 'none';
+
+            // Mule XML is COMPULSORY
+            if (xmlSource === 'local' && document.getElementById('xmlFile').files.length === 0) {
+                showError('Please select at least one Mule XML file (required)');
+                return false;
+            }
+
+            if (xmlSource === 'github') {
+                if (!document.getElementById('githubRepo').value || !document.getElementById('githubFilePath').value) {
+                    showError('Please provide GitHub repository and file path (required)');
+                    return false;
+                }
+            }
+
+            if (flowAnalysisInFlight) {
+                showError('Flow analysis is still in progress. Please wait a moment.');
+                return false;
+            }
+
+            // If flow analysis ran, a flow MUST be selected — but guard against
+            // empty dropdown values caused by race conditions.
+            if (analyzedFlowSelection) {
+                const selected = getSelectedFlows();
+                const allFlows = (analyzedFlowSelection.recommended_flows || []).concat(analyzedFlowSelection.all_flows || []);
+                if (selected.length === 0 && allFlows.length > 0) {
+                    // Auto-select first available flow rather than blocking
+                    const flowSelect = document.getElementById('flowSelect');
+                    if (flowSelect && flowSelect.options.length > 0 && !flowSelect.value) {
+                        flowSelect.value = flowSelect.options[0].value;
+                    }
+                    if (getSelectedFlows().length === 0) {
+                        showError('Please select a flow from the dropdown before generating.');
+                        return false;
+                    }
+                }
+            }
+
+            // Business use case is OPTIONAL
+            if (usecaseSource === 'local' && document.getElementById('usecaseFile').files.length === 0) {
+                return true; // OK to skip use case files
+            }
+
+            if (usecaseSource === 'confluence') {
+                if (!document.getElementById('confluenceUrl').value) {
+                    showError('Please provide Confluence URL or switch to local file');
+                    return false;
+                }
+                if (!document.getElementById('confluenceToken').value || !document.getElementById('confluenceEmail').value) {
+                    showError('Please provide Confluence token and email');
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        // Error handling
+        function showError(message) {
+            clearInterval(progressInterval);
+            document.getElementById('progressSection').classList.add('hidden');
+            
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-4 fade-in';
+            errorDiv.innerHTML = `
+                <strong>Error:</strong> ${message}
+                <button onclick="this.parentElement.remove()" class="float-right text-red-500 hover:text-red-700">&times;</button>
+            `;
+            
+            const main = document.querySelector('main');
+            main.insertBefore(errorDiv, main.firstChild);
+            
+            setTimeout(() => errorDiv.remove(), 5000);
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            // Set initial tab states
+            switchTab('xml', 'local');
+            switchTab('usecase', 'local');
+
+            ['githubRepo', 'githubBranch', 'githubFilePath', 'githubToken'].forEach(id => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.addEventListener('change', () => {
+                        if (document.querySelector('#xml-github.active')) {
+                            triggerAutoFlowAnalysis();
+                        }
+                    });
+                }
+            });
+        });
+    </script>
+</body>
+</html>
