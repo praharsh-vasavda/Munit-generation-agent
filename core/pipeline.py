@@ -75,15 +75,15 @@ mocked. Do not include markdown syntax or any other text:
 # ---------------------------------------------------------------------------
 DWL_MOCK_PROMPT = """\
 Context: You are generating mock payload files based on an architectural blueprint.
-Task: For the mock requirement "{mock_name}", generate a valid DataWeave 2.0 (%dw 2.0) \
-script representing a realistic mock response payload.
+Task: For the mock requirement "{mock_name}", generate raw mock response payload content.
 The expected payload type is: {expected_payload_type}.
 Rules:
-- If expected payload type is java for db:select or salesforce:query, return an Array of Objects.
-- If expected payload type is json, return an Object with realistic fields likely to be consumed downstream.
+- If expected payload type is java for db:select or salesforce:query, return a JSON Array of Objects.
+- If expected payload type is json, return a JSON Object with realistic fields likely to be consumed downstream.
+- Do NOT include a DataWeave header. Do NOT include %dw 2.0, output, or ---.
 - Do not return secrets, real URLs, credentials, or environment-specific values.
-Constraint: Output ONLY raw DataWeave code starting with %dw 2.0. \
-Do not wrap in markdown code blocks. Do not add conversational text.
+Constraint: Output ONLY raw mock payload content. Do not wrap in markdown code blocks.
+Do not add conversational text.
 """
 
 # ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ Task: Generate three <munit:test> blocks covering:
      data validation robustness.
 
 Constraint 1: For mock payloads, reference the external DWL files using:
-  #[readUrl('classpath://mock_payloads/{mock_name}.dwl')]
+  #[MunitTools::getResourceAsString('mock_payloads/{mock_name}.dwl')]
 Constraint 2: Never embed inline JSON, XML, or multi-line DataWeave in attributes.
 Constraint 3: Match every mock with <munit-tools:with-attribute attributeName="doc:name" whereValue="..."/>.
 Constraint 4: Do not mock transform, logger, set-variable, set-payload, choice, or flow-ref processors.
@@ -364,10 +364,7 @@ class MultiPassGenerator:
                 mock_name=mock_name,
                 expected_payload_type=expected_type,
             )
-            dwl_code = self._call(prompt).strip()
-            # Ensure it starts with %dw 2.0
-            if not dwl_code.startswith("%dw"):
-                dwl_code = "%dw 2.0\noutput application/json\n---\n" + dwl_code
+            dwl_code = self._strip_dwl_header(self._call(prompt).strip())
 
             file_path = self._mock_payload_dir / f"{mock_name}.dwl"
             file_path.write_text(dwl_code, encoding="utf-8")
@@ -375,6 +372,18 @@ class MultiPassGenerator:
             logger.info("DWL mock file written: %s", file_path)
 
         return saved
+
+    @staticmethod
+    def _strip_dwl_header(content: str) -> str:
+        """Keep mock resource files raw even if an LLM returns a DWL script."""
+        cleaned = content.strip()
+        cleaned = re.sub(r"^```(?:dataweave|dw|json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        if cleaned.lstrip().startswith("%dw"):
+            parts = cleaned.split("---", 1)
+            if len(parts) == 2:
+                cleaned = parts[1].strip()
+        return cleaned + "\n"
 
     # ------------------------------------------------------------------
     # Pass 2 — Core test blocks (three scenarios per flow)

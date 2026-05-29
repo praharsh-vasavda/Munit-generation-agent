@@ -1219,9 +1219,12 @@
             // Basic results
             html += `
                 <div><strong>Mode:</strong> Smart</div>
+                <div><strong>Generation strategy:</strong> ${result.generation_mode || result.metadata?.generation_mode || 'N/A'}</div>
+                <div><strong>Model / builder:</strong> ${result.metadata?.model_used || 'N/A'}${result.metadata?.template_based ? ' (template fallback)' : ''}</div>
                 <div><strong>Output Files:</strong> ${result.output_files ? result.output_files.length : 1}</div>
                 <div><strong>Generation Time:</strong> ${result.generation_time ? result.generation_time.toFixed(2) : 'N/A'}s</div>
             `;
+            html += generateSemanticValidationHTML(result);
             
             // Token usage
             if (result.token_usage) {
@@ -1272,18 +1275,39 @@
             return html;
         }
 
+        function generateSemanticValidationHTML(result) {
+            const sv = result.semantic_validation || result.metadata?.semantic_validation;
+            if (!sv || (!sv.errors?.length && !sv.warnings?.length && sv.valid === undefined)) {
+                return '';
+            }
+            const statusClass = sv.valid === false ? 'text-red-600' : 'text-green-600';
+            let inner = `<div class="mt-3 p-3 bg-white rounded border border-gray-200 text-sm">
+                <div><strong>Semantic validation:</strong> <span class="${statusClass}">${sv.valid === false ? 'Failed' : 'OK'}</span></div>`;
+            if (sv.errors?.length) {
+                inner += `<ul class="list-disc ml-5 mt-1 text-red-700">${sv.errors.map(e => `<li>${e}</li>`).join('')}</ul>`;
+            }
+            if (sv.warnings?.length) {
+                inner += `<ul class="list-disc ml-5 mt-1 text-amber-700">${sv.warnings.map(w => `<li>${w}</li>`).join('')}</ul>`;
+            }
+            inner += '</div>';
+            return inner;
+        }
+
         function generateLegacyResultsHTML(result) {
             return `
                 <div class="bg-green-50 p-4 rounded-lg border border-green-200">
                     <h4 class="font-semibold text-green-800 mb-2">Generation Successful!</h4>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
                         <div><strong>Mode:</strong> Legacy</div>
+                        <div><strong>Generation strategy:</strong> ${result.generation_mode || result.metadata?.generation_mode || 'N/A'}</div>
+                        <div><strong>Model / builder:</strong> ${result.metadata?.model_used || 'N/A'}${result.metadata?.template_based ? ' (template fallback)' : ''}</div>
                         <div><strong>Output File:</strong> ${result.output_file}</div>
                         <div><strong>Job Type:</strong> ${result.flow_summary?.job_type || 'N/A'}</div>
                         <div><strong>Main Flow:</strong> ${result.flow_summary?.flows?.[0] || 'N/A'}</div>
                         <div><strong>Scenarios:</strong> ${result.scenarios_count || 0}</div>
                         <div><strong>Generation Time:</strong> ${result.generation_time?.toFixed(2) || 'N/A'}s</div>
                     </div>
+                    ${generateSemanticValidationHTML(result)}
                     ${result.build_validation ? generateBuildValidationHTML(result.build_validation) : ''}
                     <div class="flex justify-center mt-4">
                         <a href="/api/download/${currentJobId}" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-lg transition">

@@ -30,7 +30,15 @@ from utils.token_tracker import TokenBudget, TokenEstimator
 
 # Import existing core modules
 from config import Config
-from core import XMLAnalyzer, DocumentParser, PromptBuilder, RulesetLoader, BlueprintPipeline
+from core import (
+    XMLAnalyzer,
+    DocumentParser,
+    PromptBuilder,
+    RulesetLoader,
+    BlueprintPipeline,
+    DeterministicMUnitBuilder,
+    MUnitSemanticValidator,
+)
 from inputs import GitHubFetcher, LocalReader, ConfluenceReader
 from llm import LLMRouter
 from munitWriter import MUnitWriter
@@ -107,6 +115,8 @@ class WebMUnitGenerator:
             llm_caller=lambda prompt: self.llm_router.generate_raw(prompt),
             output_dir='./output/',
         )
+        self.deterministic_builder = DeterministicMUnitBuilder(output_dir=self.config.output_path)
+        self.semantic_validator = MUnitSemanticValidator()
         
         logger.info(f"WebMUnitGenerator initialized with token budget: {token_budget}")
     
@@ -165,11 +175,13 @@ class WebMUnitGenerator:
                 scenarios,
                 sample_payloads=self._build_sample_payloads_dict(params),
                 target_munit_version=target_munit_version,
+                generation_mode=params.get("generation_mode"),
             )
             output_files = []
             for item in generation_outputs:
                 output_files.append(item["output_file"])
                 output_files.extend(item.get("extra_files", []))
+            output_files = self._dedupe_preserve_order(output_files)
             output_file = output_files[0] if output_files else None
             
             # Step 8: Complete
@@ -186,6 +198,8 @@ class WebMUnitGenerator:
                 'build_validation': params.get('build_validation', {}),
                 'scenarios_count': len(scenarios["scenarios"]),
                 'metadata': generation_outputs[0]["metadata"] if generation_outputs else {},
+                'generation_mode': (generation_outputs[0]["metadata"].get("generation_mode") if generation_outputs else "deterministic"),
+                'semantic_validation': (generation_outputs[0]["metadata"].get("semantic_validation") if generation_outputs else {}),
                 'generation_time': sum(item["metadata"].get('generation_time', 0) for item in generation_outputs),
                 'token_usage': token_usage,
                 'security': {'sanitized': True, 'warnings': []}
@@ -368,13 +382,16 @@ class WebMUnitGenerator:
             generation_outputs = self._generate_targeted_munits(
                 flow_summary,
                 scenario_map,
+                scenarios,
                 sample_payloads=self._build_sample_payloads_dict(params),
                 target_munit_version=target_munit_version,
+                generation_mode=params.get("generation_mode"),
             )
             output_files = []
             for item in generation_outputs:
                 output_files.append(item["output_file"])
                 output_files.extend(item.get("extra_files", []))
+            output_files = self._dedupe_preserve_order(output_files)
             output_file = output_files[0] if output_files else None
             
             # Step 8: Complete
@@ -392,6 +409,8 @@ class WebMUnitGenerator:
                 'build_validation': params.get('build_validation', {}),
                 'scenarios_count': len(scenarios["scenarios"]),
                 'metadata': generation_outputs[0]["metadata"] if generation_outputs else {},
+                'generation_mode': (generation_outputs[0]["metadata"].get("generation_mode") if generation_outputs else "deterministic"),
+                'semantic_validation': (generation_outputs[0]["metadata"].get("semantic_validation") if generation_outputs else {}),
                 'generation_time': sum(item["metadata"].get('generation_time', 0) for item in generation_outputs),
                 'token_usage': token_usage,
                 'security': {'sanitized': True, 'warnings': []}
@@ -454,6 +473,20 @@ class WebMUnitGenerator:
         except Exception as e:
             return f"[Error reading file {file.filename}: {str(e)}]"
 
+    def _resolve_generation_mode(
+        self,
+        generation_mode: Optional[str],
+        sample_payloads: dict,
+    ) -> str:
+        """
+        Resolve generation strategy for the web app.
+
+        The web UI no longer exposes generation modes. Uploaded Mule apps are
+        generated through the backend recorder-style path so output is
+        Studio-like and consistent without user selection.
+        """
+        return "recorder"
+
     def _generate_targeted_munits(
         self,
         flow_summary: dict,
@@ -461,6 +494,7 @@ class WebMUnitGenerator:
         document_context: dict = None,
         sample_payloads: dict = None,
         target_munit_version: Optional[str] = None,
+        generation_mode: Optional[str] = None,
     ) -> list:
         """
         Generate one MUnit suite per target flow using focused context.
@@ -476,9 +510,12 @@ class WebMUnitGenerator:
                              Use key '_all' to apply one payload to every flow.
         """
         outputs = []
-        test_targets = flow_summary.get("test_targets") or flow_summary.get("flows") or ["main-flow"]
+        test_targets = self._dedupe_preserve_order(
+            flow_summary.get("test_targets") or flow_summary.get("flows") or ["main-flow"]
+        )
         flow_contexts = flow_summary.get("flow_contexts", {})
         sample_payloads = sample_payloads or {}
+        resolved_mode = self._resolve_generation_mode(generation_mode, sample_payloads)
 
         # Reset token tracking for this generation session
         self.token_budget.reset()
@@ -487,9 +524,7 @@ class WebMUnitGenerator:
             flow_context = dict(flow_contexts.get(target_flow, {"target_flow": target_flow}))
             target_scenarios = scenario_map.get(target_flow) or []
             flow_context["scenarios"] = target_scenarios
-            dwl_content = self._select_dwl_context(flow_context)
 
-            # Resolve sample payload: per-flow key takes priority over '_all' key
             sample_payload = (
                 sample_payloads.get(target_flow)
                 or sample_payloads.get("_all")
@@ -498,51 +533,80 @@ class WebMUnitGenerator:
             if sample_payload:
                 logger.info(f"Using sample payload for '{target_flow}' ({len(sample_payload)} chars)")
 
-            # Security: Sanitize flow content before sending to LLM
-            sanitized_flow_summary = self._sanitize_flow_summary(flow_summary)
+            mode = resolved_mode
 
-            # Build prompt with sanitized content
-            prompt = self.prompt_builder.build_prompt(
-                sanitized_flow_summary,
-                target_scenarios,
-                self.ruleset,
-                flow_context=flow_context,
-                document_context=document_context,
-                dwl_content=dwl_content,
-                sample_payload=sample_payload,
-                munit_version=target_munit_version,
-            )
-            
-            # Estimate and track token usage
-            estimated_tokens = TokenEstimator.estimate_tokens(prompt)
-            logger.info(f"Generating MUnit for '{target_flow}' - estimated prompt tokens: {estimated_tokens}")
-            
-            # Generate MUnit via LLM
-            munit_xml, llm_metadata = self.llm_router.generate_munit(prompt)
-            
-            # Track actual token usage if available from LLM response
-            if 'input_tokens' in llm_metadata and 'output_tokens' in llm_metadata:
-                self.token_budget.record_llm_usage(
-                    operation=f"generate_{target_flow}",
-                    input_tokens=llm_metadata.get('input_tokens', estimated_tokens),
-                    output_tokens=llm_metadata.get('output_tokens', 0)
+            if mode in {"deterministic", "recorder"}:
+                munit_xml, build_metadata = self.deterministic_builder.build_suite(
+                    flow_context,
+                    generation_mode=mode,
+                    sample_payload=sample_payload,
+                    scenarios=target_scenarios,
                 )
+                validation = self.semantic_validator.validate(munit_xml, flow_context)
+                maven_paths = self.deterministic_builder.write_maven_layout(munit_xml, build_metadata)
+
+                metadata = {
+                    "model_used": "deterministic-builder",
+                    "template_based": False,
+                    "generation_mode": mode,
+                    "target_flow": target_flow,
+                    "source_file": flow_context.get("source_file", "unknown.xml"),
+                    "scenario_count": build_metadata.get("test_count", 1),
+                    "related_flows": flow_context.get("related_flows", []),
+                    "semantic_validation": validation,
+                    "maven_layout_paths": maven_paths,
+                    "resource_files": build_metadata.get("resource_files", {}),
+                    "generation_time": 0.0,
+                    "failures": validation.get("errors", []),
+                }
+                output_file = maven_paths.get("suite_file") or str(
+                    Path(self.config.output_path) / f"{target_flow}-munit-test.xml"
+                )
+                Path(output_file).write_text(munit_xml, encoding="utf-8")
+                extra_files = self._resource_paths_from_maven_layout(maven_paths)
             else:
-                self.token_budget.use_tokens(estimated_tokens, f"generate_{target_flow}")
-            
-            # Build comprehensive metadata
-            metadata = {
-                **llm_metadata,
-                "target_flow": target_flow,
-                "source_file": flow_context.get("source_file", "unknown.xml"),
-                "scenario_count": len(target_scenarios),
-                "related_flows": flow_context.get("related_flows", []),
-                "security_sanitized": True,
-                "estimated_tokens": estimated_tokens
-            }
-            
-            output_file = self.munit_writer.write_munit_file(munit_xml, target_flow, metadata)
-            extra_files = metadata.get("mock_asset_files", []) or []
+                dwl_content = self._select_dwl_context(flow_context)
+                sanitized_flow_summary = self._sanitize_flow_summary(flow_summary)
+                prompt = self.prompt_builder.build_prompt(
+                    sanitized_flow_summary,
+                    target_scenarios,
+                    self.ruleset,
+                    flow_context=flow_context,
+                    document_context=document_context,
+                    dwl_content=dwl_content,
+                    sample_payload=sample_payload,
+                    munit_version=target_munit_version,
+                )
+                estimated_tokens = TokenEstimator.estimate_tokens(prompt)
+                logger.info(
+                    f"Generating MUnit for '{target_flow}' via LLM - estimated prompt tokens: {estimated_tokens}"
+                )
+                munit_xml, llm_metadata = self.llm_router.generate_munit(prompt)
+                if "input_tokens" in llm_metadata and "output_tokens" in llm_metadata:
+                    self.token_budget.record_llm_usage(
+                        operation=f"generate_{target_flow}",
+                        input_tokens=llm_metadata.get("input_tokens", estimated_tokens),
+                        output_tokens=llm_metadata.get("output_tokens", 0),
+                    )
+                else:
+                    self.token_budget.use_tokens(estimated_tokens, f"generate_{target_flow}")
+
+                validation = self.semantic_validator.validate(munit_xml, flow_context)
+                metadata = {
+                    **llm_metadata,
+                    "generation_mode": "llm_suite",
+                    "target_flow": target_flow,
+                    "source_file": flow_context.get("source_file", "unknown.xml"),
+                    "scenario_count": len(target_scenarios),
+                    "related_flows": flow_context.get("related_flows", []),
+                    "security_sanitized": True,
+                    "estimated_tokens": estimated_tokens,
+                    "semantic_validation": validation,
+                    "template_based": llm_metadata.get("template_based", False),
+                }
+                output_file = self.munit_writer.write_munit_file(munit_xml, target_flow, metadata)
+                extra_files = metadata.get("mock_asset_files", []) or []
+
             outputs.append({
                 "target_flow": target_flow,
                 "output_file": output_file,
@@ -558,6 +622,28 @@ class WebMUnitGenerator:
             logger.info(f"  {suggestion}")
 
         return outputs
+
+    @staticmethod
+    def _dedupe_preserve_order(values: list) -> list:
+        """Return unique non-empty values in their first-seen order."""
+        seen = set()
+        deduped = []
+        for value in values or []:
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            deduped.append(value)
+        return deduped
+
+    def _resource_paths_from_maven_layout(self, maven_paths: dict) -> list:
+        """Return generated companion resource files without repeating suite XML."""
+        return self._dedupe_preserve_order(
+            [
+                path
+                for key, path in (maven_paths or {}).items()
+                if key not in {"suite_file", "suite_file_maven"}
+            ]
+        )
 
     def _select_dwl_context(self, flow_context: dict) -> dict:
         """Return only DWL files that are relevant to the current target flow."""
@@ -1078,7 +1164,9 @@ class WebMUnitGenerator:
         if not selected_flows:
             return flow_summary
 
-        selected = [flow for flow in selected_flows if flow in (flow_summary.get("flow_contexts", {}) or {})]
+        selected = self._dedupe_preserve_order(
+            [flow for flow in selected_flows if flow in (flow_summary.get("flow_contexts", {}) or {})]
+        )
         if not selected:
             return flow_summary
 

@@ -1,0 +1,35 @@
+# Recorder mode — Studio Test Recorder alignment
+
+generation_modes:
+  deterministic:
+    description: "Code-assembled suite with enforced mocks from mock_plan"
+    default: true
+    max_tests_per_flow: 1
+    max_assertions_per_test: 3
+    use_classpath_dwl_assets: true
+
+  recorder:
+    description: "Single happy-path test with munit-tools:that expression assert"
+    max_tests_per_flow: 1
+    max_assertions_per_test: 1
+    prefer_sample_payload: true
+    validation_style: "munit-tools:that_with_dwl_module"
+    mock_all_outbound: true
+
+  llm_suite:
+    description: "Legacy LLM-generated full XML — use only when deterministic is insufficient"
+    discouraged: true
+
+recorder_assertion_policy:
+  - "Prefer one munit-tools:that importing assert_expression_payload.dwl"
+  - "Do not add attributes.statusCode unless flow sets HTTP response status explicitly"
+  - "Do not verify-call outbound connectors that return payloads (http:request, db:select)"
+  - "verify-call only for void connectors: MQ publish, email, kafka producer"
+
+set_event_policy:
+  http_listener:
+    - "Derive method and path from http:listener"
+    - "Populate attributes.queryParams when DWL reads attributes.queryParams.*"
+    - "Use empty payload for GET when only queryParams are read"
+  sample_payload_override:
+    - "When user provides sample request/response, use it as authoritative for set-event and assert"

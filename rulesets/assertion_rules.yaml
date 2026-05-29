@@ -131,14 +131,14 @@ assertion_types:
 
   scheduler_success:
     required_assertions:
-      - type: "execution_side_effect"
-        description: "Assert whatever the scheduler flow produces — variable, DB write mock call, MQ publish"
-        derivation: "check what verify-call mocks are in scope; assert those were called"
-        template: |
-          <munit-tools:verify-call
-              processor="{connector}::operation"
-              doc:name="Verify {connector} was called"
-              times="1"/>
+      - type: "no_error_thrown"
+        description: "Assert the scheduler run completed without error"
+        expression: "#[error]"
+        matcher: "munit-tools:nullValue()"
+      - type: "payload_not_null"
+        description: "Assert the scheduler produced a payload (if any output exists)"
+        expression: "#[payload]"
+        matcher: "munit-tools:notNullValue()"
 
 # XML TEMPLATES — fully correct MUnit 2.x syntax
 assertion_xml_templates:

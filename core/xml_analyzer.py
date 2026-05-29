@@ -216,7 +216,7 @@ class XMLAnalyzer:
             ("kafka:consumer", "Kafka Consumer"),
             ("sftp:listener", "SFTP Listener")
         ]
-        
+
         for listener_tag, job_type in listener_checks:
             if self._find_element_by_tag(root, listener_tag, namespaces):
                 return job_type
@@ -343,7 +343,10 @@ class XMLAnalyzer:
             "doc_name": doc_name,
         }
 
-        for attr_key in ("name", "path", "method", "config-ref", "value", "variableName", "ref"):
+        for attr_key in (
+            "name", "path", "method", "allowedMethods", "config-ref",
+            "value", "variableName", "ref", "url",
+        ):
             if attr_key in element.attrib:
                 metadata[attr_key.replace("-", "_")] = element.attrib.get(attr_key)
 
@@ -577,8 +580,13 @@ class XMLAnalyzer:
 
     def _find_element_by_tag(self, root: ET.Element, tag_pattern: str, namespaces: Dict[str, str]) -> Optional[ET.Element]:
         """Find first element matching tag pattern."""
+        # Mule XML uses namespace-qualified tags like "{...}listener". Matching on the
+        # literal "http:listener" substring will fail. Instead, compare against our
+        # qualified processor type (e.g. "http:listener", "db:select").
         for element in root.iter():
-            if tag_pattern in element.tag:
+            local_name = self._local_tag_name(element.tag)
+            qualified = self._qualify_processor_type(element, local_name)
+            if qualified == tag_pattern:
                 return element
         return None
 
@@ -867,6 +875,18 @@ class XMLAnalyzer:
                     if ref not in inherited_payload_refs:
                         inherited_payload_refs.append(ref)
 
+            from .deterministic_munit_builder import build_set_event_plan, extract_output_fields
+
+            set_event_plan = build_set_event_plan(
+                node.get("processor_chain", []),
+                inline_dwl[:8],
+                node.get("trigger", {}) or {},
+            )
+            output_fields = extract_output_fields(
+                inline_dwl[:8],
+                node.get("final_processor", {}) or {},
+            )
+
             contexts[target] = {
                 "target_flow": target,
                 "target_type": node.get("type", "unknown"),
@@ -885,6 +905,8 @@ class XMLAnalyzer:
                 "inline_dwl": inline_dwl[:8],
                 "payload_references": inherited_payload_refs[:30],
                 "mock_plan": inherited_mock_plan[:20],
+                "set_event_plan": set_event_plan,
+                "output_fields": output_fields,
                 "related_flow_details": related_flow_details[:8],
                 "xml_snippet": node.get("xml_snippet", "")
             }

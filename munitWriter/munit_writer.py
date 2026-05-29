@@ -308,7 +308,7 @@ class MUnitWriter:
             if not raw_value or len(raw_value) < 12:
                 continue
 
-            dwl_body = self._convert_expression_to_dwl(raw_value, media_type)
+            dwl_body = self._convert_expression_to_dwl(raw_value, media_type, raw_resource=(family == "mock"))
             if not dwl_body:
                 continue
 
@@ -321,7 +321,12 @@ class MUnitWriter:
 
         return written_files
 
-    def _convert_expression_to_dwl(self, expression: str, media_type: str) -> Optional[str]:
+    def _convert_expression_to_dwl(
+        self,
+        expression: str,
+        media_type: str,
+        raw_resource: bool = False,
+    ) -> Optional[str]:
         """Convert a simple inline Mule expression payload into a standalone DWL file."""
         expression = expression.strip()
         if not expression.startswith("#[") or not expression.endswith("]"):
@@ -330,6 +335,9 @@ class MUnitWriter:
         inner = expression[2:-1].strip()
         if not inner:
             return None
+
+        if raw_resource:
+            return inner + "\n"
 
         output_type = "application/java" if "java" in media_type else "application/json"
         return "\n".join([

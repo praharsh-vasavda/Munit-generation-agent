@@ -270,7 +270,7 @@ Think like MuleSoft's test recorder. For each flow, trace the EXACT data path:
 
 ### 1.1 IDENTIFY THE TRIGGER (this becomes munit:set-event)
 Find the FIRST element in the flow:
-- <http:listener> → set-event needs: payload + attributes.method + attributes.requestPath + attributes.headers
+- <http:listener> → set-event needs: payload + attributes.method + attributes.requestPath + attributes.headers + attributes.queryParams + attributes.uriParams
 - <anypoint-mq:subscriber> → set-event needs: payload + attributes.messageId + attributes.destination
 - <scheduler> → set-event needs: null payload + attributes.scheduledTime
 - <sftp:listener> → set-event needs: file content as payload + attributes.fileName + attributes.directory

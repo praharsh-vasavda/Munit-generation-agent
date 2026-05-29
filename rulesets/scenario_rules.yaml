@@ -12,8 +12,9 @@ scenario_derivation_rules:
   input_derivation_by_trigger:
     http:listener:
       method: "read from listener path + HTTP method attribute"
-      payload_fields: "read from first transform:message that reads payload.X or payload.body.X"
-      example: "if transform reads payload.customerId and payload.amount, input is {customerId, amount}"
+      payload_fields: "read from first transform:message that reads payload.X or payload.body.X (request body)"
+      attributes_fields: "derive from first transform:message that reads attributes.queryParams.*, attributes.uriParams.*, attributes.headers.*"
+      example: "if transform reads payload.customerId and attributes.queryParams.country, input is {customerId, queryParams.country}"
     
     anypoint-mq:subscriber:
       payload_fields: "read from first transform that reads payload after subscriber"

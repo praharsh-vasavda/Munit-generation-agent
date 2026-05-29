@@ -78,7 +78,7 @@ behavior_section:
   error_mock_structure:
     use_raise_error: true
     xml_template: |
-      <munit-tools:mock-when processor="{connector}::{operation}"
+      <munit-tools:mock-when processor="{connector}"
           doc:name="Mock {connector} failure">
           <munit-tools:with-attributes>
               <munit-tools:with-attribute
@@ -101,8 +101,8 @@ set_event_structure:
             mediaType="application/json"/>
         <munit:attributes
             value="#[{
-                method: 'POST',
-                requestPath: '/api/resource',
+                method: '{HTTP_METHOD}',
+                requestPath: '{HTTP_PATH}',
                 headers: {
                     'content-type': 'application/json'
                 },
@@ -185,7 +185,7 @@ validation_section:
 
   verify_call_template: |
     <munit-tools:verify-call
-        processor="{connector}::{operation}"
+        processor="{connector}"
         doc:name="Verify {description}"
         times="1"/>
 
@@ -299,7 +299,7 @@ complete_test_templates:
         <munit:validation>
             <!-- verify-call for each void outbound connector -->
             <munit-tools:verify-call
-                processor="{connector}::{operation}"
+                processor="{connector}"
                 doc:name="Verify {connector} called"
                 times="1"/>
         </munit:validation>

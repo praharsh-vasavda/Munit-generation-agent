@@ -14,6 +14,8 @@ from .pipeline import (
     TemplateAssembler,
     SelfHealingRunner,
 )
+from .deterministic_munit_builder import DeterministicMUnitBuilder
+from .munit_semantic_validator import MUnitSemanticValidator
 
 __all__ = [
     "XMLAnalyzer",
@@ -26,4 +28,6 @@ __all__ = [
     "MultiPassGenerator",
     "TemplateAssembler",
     "SelfHealingRunner",
+    "DeterministicMUnitBuilder",
+    "MUnitSemanticValidator",
 ]

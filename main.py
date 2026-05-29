@@ -10,7 +10,14 @@ from rich.panel import Panel
 from rich.table import Table
 
 from config import Config
-from core import XMLAnalyzer, DocumentParser, PromptBuilder, RulesetLoader
+from core import (
+    XMLAnalyzer,
+    DocumentParser,
+    PromptBuilder,
+    RulesetLoader,
+    DeterministicMUnitBuilder,
+    MUnitSemanticValidator,
+)
 from inputs import GitHubFetcher, LocalReader, ConfluenceReader
 from llm import LLMRouter
 from munitWriter import MUnitWriter
@@ -50,6 +57,14 @@ def generate(
     confluence_email: Optional[str] = typer.Option(None, help="Confluence email"),
     
     output_path: Optional[str] = typer.Option(None, help="Output directory for generated files"),
+    generation_mode: str = typer.Option(
+        "deterministic",
+        help="Generation mode: deterministic, recorder, or llm_suite",
+    ),
+    sample_payload: Optional[str] = typer.Option(
+        None,
+        help='JSON sample request/response for recorder mode (e.g. \'{"request":{"queryParams":{"country":"India"}}}\')',
+    ),
     
     verbose: bool = typer.Option(False, help="Enable verbose output")
 ):
@@ -66,9 +81,14 @@ def generate(
         
         # Validate configuration
         validation = config.validate_all()
-        
-        if not validation["llm"]["valid"]:
-            console.print("[red]Error: No LLM API keys configured. Please set up API keys in .env file.[/red]")
+        mode = (generation_mode or "deterministic").strip().lower()
+        if mode == "llm":
+            mode = "llm_suite"
+        if sample_payload and mode == "deterministic":
+            mode = "recorder"
+
+        if mode == "llm_suite" and not validation["llm"]["valid"]:
+            console.print("[red]Error: llm_suite mode requires LLM API keys in .env[/red]")
             console.print("Missing keys: " + ", ".join(validation["llm"]["missing_keys"]))
             raise typer.Exit(1)
         
@@ -83,6 +103,8 @@ def generate(
         ruleset_loader = RulesetLoader()
         llm_router = LLMRouter(timeout=config.llm_timeout)
         munit_writer = MUnitWriter(output_dir=config.output_path)
+        deterministic_builder = DeterministicMUnitBuilder(output_dir=config.output_path)
+        semantic_validator = MUnitSemanticValidator()
         
         # Load ruleset
         console.print("[blue]Loading ruleset...[/blue]")
@@ -168,17 +190,60 @@ def generate(
         
         scenario_map = doc_parser.map_scenarios_to_flows(scenarios["scenarios"], flow_summary)
 
-        # Build targeted prompts, generate, and write per-flow MUnits
-        console.print("[blue]Generating per-flow MUnit suites...[/blue]")
+        if mode in {"deterministic", "recorder"}:
+            console.print(f"[blue]Generating per-flow MUnit suites ({mode})...[/blue]")
+        else:
+            if not validation["llm"]["valid"]:
+                console.print("[red]Error: llm_suite mode requires LLM API keys in .env[/red]")
+                raise typer.Exit(1)
+            console.print("[blue]Generating per-flow MUnit suites (llm_suite)...[/blue]")
+
         generation_outputs = []
         for target_flow in flow_summary.get("test_targets") or flow_summary.get("flows") or ["main-flow"]:
-            flow_context = flow_summary.get("flow_contexts", {}).get(target_flow, {"target_flow": target_flow})
+            flow_context = dict(
+                flow_summary.get("flow_contexts", {}).get(target_flow, {"target_flow": target_flow})
+            )
+            target_scenarios = scenario_map.get(target_flow, [])
+
+            if mode in {"deterministic", "recorder"}:
+                munit_xml, build_metadata = deterministic_builder.build_suite(
+                    flow_context,
+                    generation_mode=mode,
+                    sample_payload=sample_payload,
+                    scenarios=target_scenarios,
+                )
+                validation_result = semantic_validator.validate(munit_xml, flow_context)
+                maven_paths = deterministic_builder.write_maven_layout(munit_xml, build_metadata)
+                metadata = {
+                    "model_used": "deterministic-builder",
+                    "template_based": False,
+                    "generation_mode": mode,
+                    "target_flow": target_flow,
+                    "source_file": flow_context.get("source_file", "unknown.xml"),
+                    "scenario_count": build_metadata.get("test_count", 1),
+                    "related_flows": flow_context.get("related_flows", []),
+                    "semantic_validation": validation_result,
+                    "generation_time": 0.0,
+                }
+                output_file = maven_paths.get("suite_file", "")
+                generation_outputs.append({
+                    "target_flow": target_flow,
+                    "output_file": output_file,
+                    "metadata": metadata,
+                })
+                if validation_result.get("errors"):
+                    console.print(f"[yellow]Semantic validation warnings for {target_flow}:[/yellow]")
+                    for err in validation_result["errors"]:
+                        console.print(f"  - {err}")
+                continue
+
             prompt = prompt_builder.build_prompt(
                 flow_summary,
-                scenario_map.get(target_flow, []),
+                target_scenarios,
                 ruleset,
                 flow_context=flow_context,
-                document_context=scenarios
+                document_context=scenarios,
+                sample_payload=sample_payload,
             )
 
             if not prompt_builder.validate_prompt_structure(prompt):
@@ -188,10 +253,12 @@ def generate(
             munit_xml, metadata = llm_router.generate_munit(prompt)
             metadata = {
                 **metadata,
+                "generation_mode": "llm_suite",
                 "target_flow": target_flow,
                 "source_file": flow_context.get("source_file", "unknown.xml"),
-                "scenario_count": len(scenario_map.get(target_flow, [])),
-                "related_flows": flow_context.get("related_flows", [])
+                "scenario_count": len(target_scenarios),
+                "related_flows": flow_context.get("related_flows", []),
+                "semantic_validation": semantic_validator.validate(munit_xml, flow_context),
             }
             output_file = munit_writer.write_munit_file(munit_xml, target_flow, metadata)
             generation_outputs.append({
@@ -218,7 +285,12 @@ def generate(
         results_table.add_row("Target Flows", str(len(flow_summary.get("test_targets", []))))
         results_table.add_row("Scenarios Generated", str(len(scenarios["scenarios"])))
         results_table.add_row("Tests Generated", str(file_info.get("test_count", "Unknown")))
-        results_table.add_row("LLM Model", generation_outputs[0]["metadata"]["model_used"] if generation_outputs else "Unknown")
+        first_meta = generation_outputs[0]["metadata"] if generation_outputs else {}
+        results_table.add_row("Generation Mode", first_meta.get("generation_mode", mode))
+        results_table.add_row("Model / Builder", first_meta.get("model_used", "Unknown"))
+        if first_meta.get("semantic_validation"):
+            sv = first_meta["semantic_validation"]
+            results_table.add_row("Semantic Validation", "OK" if sv.get("valid", True) else "Failed")
         results_table.add_row("Generation Time", f"{sum(item['metadata']['generation_time'] for item in generation_outputs):.2f}s")
         results_table.add_row("XML Valid", "Yes" if file_info.get("valid_xml") else "No")
         
