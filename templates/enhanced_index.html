@@ -288,39 +288,29 @@
             <!-- POM Dependency Banner (blocking) -->
             <div id="pomBanner" class="hidden mb-6"></div>
 
-            <!-- Sample Payload Section -->
+            <!-- Connector Samples Section -->
             <div class="mb-6">
-                <h3 class="text-lg font-medium mb-1">Sample Request / Response <span class="text-sm font-normal text-gray-500">(optional but strongly recommended)</span></h3>
+                <h3 class="text-lg font-medium mb-1">Connector Mock Samples <span class="text-sm font-normal text-gray-500">(optional but strongly recommended)</span></h3>
                 <p class="text-sm text-gray-600 mb-3">
-                    Paste a real request payload and/or expected response for the selected flow.
-                    This is the same data MUnit Test Recorder captures from a live run — it
-                    produces <strong>exact field names</strong> in set-event and mock-when blocks
-                    rather than guessed values from DataWeave analysis.
+                    After analysis, the app lists the outbound connectors that will be mocked.
+                    Provide a sample request and response for each connector so the generated mock files use real contract data instead of inferred fallback values.
                 </p>
-                <div id="samplePayloadContainer" class="hidden">
-                    <textarea id="samplePayload" rows="8"
-                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 font-mono text-sm"
-                        placeholder='// REQUEST payload (what the flow receives):
-{
-  "customerId": "CUST-001",
-  "amount": 150.00,
-  "currency": "USD"
-}
-
-// RESPONSE payload (what the flow returns on success):
-{
-  "orderId": "ORD-2024-001",
-  "status": "ACCEPTED",
-  "message": "Order processed successfully"
-}'></textarea>
-                    <p class="text-xs text-gray-500 mt-1">
-                        Include both the request and the expected response if available.
-                        If you only have the request, the agent will infer response fields from DataWeave.
-                    </p>
+                <div id="connectorSamplesContainer" class="hidden space-y-4">
                 </div>
-                <div id="samplePayloadHint" class="text-sm text-gray-500 bg-blue-50 border border-blue-200 rounded-lg p-3">
-                    <strong>💡 Tip:</strong> Select a flow above to enable the sample payload field.
-                    You can find a real sample by running the flow once in Anypoint Studio or Postman.
+                <div id="connectorSamplesHint" class="text-sm text-gray-500 bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    Select a flow above to see the connectors that need mock samples.
+                </div>
+            </div>
+
+            <!-- Generation Review Section -->
+            <div class="mb-6">
+                <h3 class="text-lg font-medium mb-1">Generation Review</h3>
+                <p class="text-sm text-gray-600 mb-3">
+                    Review the flow, mocks, scenarios, and assertion approach before creating files.
+                </p>
+                <div id="generationReview" class="hidden border border-gray-200 rounded-lg bg-gray-50 p-4"></div>
+                <div id="generationReviewHint" class="text-sm text-gray-500 bg-gray-50 border border-dashed border-gray-300 rounded-lg p-4">
+                    Flow analysis will prepare the generation review automatically.
                 </div>
             </div>
 
@@ -373,6 +363,7 @@
         let uploadedFolder = null;
         let analyzedFlowSelection = null;
         let analyzedBuildValidation = null;
+        let connectorSampleValues = {};
         let flowAnalysisInFlight = false;
         let lastFlowAnalysisSignature = null;
 
@@ -464,10 +455,11 @@
 
             if (type === 'xml') {
                 analyzedFlowSelection = null;
+                connectorSampleValues = {};
                 lastFlowAnalysisSignature = null;
                 document.getElementById('flowSelectionSection').classList.add('hidden');
                 document.getElementById('flowSelectionPlaceholder').classList.remove('hidden');
-                showSamplePayloadField(false);
+                renderConnectorSamples();
                 document.getElementById('pomBanner').classList.add('hidden');
                 document.getElementById('pomBanner').innerHTML = '';
                 if (source === 'github') {
@@ -735,7 +727,8 @@
                 lastFlowAnalysisSignature = getFlowAnalysisSignature();
                 renderFlowSelection(response.data.selection, analyzedBuildValidation);
                 renderPomBanner(analyzedBuildValidation);
-                showSamplePayloadField(true);
+                renderConnectorSamples();
+                renderGenerationReview();
                 flowAnalysisInFlight = false;
             } catch (error) {
                 flowAnalysisInFlight = false;
@@ -745,6 +738,7 @@
 
         function triggerAutoFlowAnalysis() {
             analyzedFlowSelection = null;
+            connectorSampleValues = {};
             analyzedBuildValidation = null;
             const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
             const signature = getFlowAnalysisSignature();
@@ -806,7 +800,11 @@
             hint.textContent = selectedFlow
                 ? `${selectedFlow.selection_reason || ''} Child flows referenced by this parent flow will be included automatically.`
                 : 'No selectable parent flows were found.';
-            flowSelect.onchange = updateFlowSelectionHint;
+            flowSelect.onchange = () => {
+                updateFlowSelectionHint();
+                renderConnectorSamples();
+                renderGenerationReview();
+            };
         }
 
         function generateBuildValidationSummary(buildValidation) {
@@ -897,11 +895,7 @@
 
             if (includeSelectedFlows) {
                 formData.append('selected_flows', JSON.stringify(getSelectedFlows()));
-                // Include sample payload if provided
-                const samplePayload = document.getElementById('samplePayload');
-                if (samplePayload && samplePayload.value.trim()) {
-                    formData.append('sample_payload', samplePayload.value.trim());
-                }
+                formData.append('connector_samples', JSON.stringify(collectConnectorSamples()));
             }
 
             return formData;
@@ -965,19 +959,190 @@
             }
         }
 
-        // ── Sample Payload helpers ────────────────────────────────────────────
-        function showSamplePayloadField(visible) {
-            const container = document.getElementById('samplePayloadContainer');
-            const hint = document.getElementById('samplePayloadHint');
+        // ── Connector sample helpers ──────────────────────────────────────────
+        function renderConnectorSamples() {
+            saveConnectorSampleDrafts();
+            const container = document.getElementById('connectorSamplesContainer');
+            const hint = document.getElementById('connectorSamplesHint');
             if (!container || !hint) return;
-            if (visible) {
-                container.classList.remove('hidden');
-                hint.classList.add('hidden');
-            } else {
+
+            const flow = getSelectedFlowDetails();
+            const connectors = flow?.mock_connectors || [];
+            if (!flow) {
                 container.classList.add('hidden');
                 hint.classList.remove('hidden');
-                document.getElementById('samplePayload').value = '';
+                hint.textContent = 'Select a flow above to see the connectors that need mock samples.';
+                container.innerHTML = '';
+                return;
             }
+            if (!connectors.length) {
+                container.classList.add('hidden');
+                hint.classList.remove('hidden');
+                hint.textContent = 'No outbound connectors requiring mock samples were detected for this flow.';
+                container.innerHTML = '';
+                return;
+            }
+
+            hint.classList.add('hidden');
+            container.classList.remove('hidden');
+            container.innerHTML = connectors.map(connector => {
+                const saved = connectorSampleValues[connector.id] || {};
+                return `
+                    <div class="border border-gray-200 rounded-lg bg-gray-50 p-4" data-connector-sample="${escapeHtml(connector.id)}">
+                        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-3">
+                            <div>
+                                <div class="font-medium text-gray-900">${escapeHtml(connector.display_name || connector.doc_name)}</div>
+                                <div class="text-xs text-gray-500">
+                                    Flow: ${escapeHtml(connector.flow)} · Match: ${escapeHtml(connector.match_attribute)} = ${escapeHtml(connector.match_value)}
+                                </div>
+                            </div>
+                            <span class="text-xs text-gray-600 bg-white border border-gray-200 rounded px-2 py-1">${escapeHtml(connector.media_type || 'application/json')}</span>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-medium text-gray-700 mb-1">Sample input sent to this connector</label>
+                                <textarea data-sample-field="request" rows="6"
+                                    class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 font-mono text-sm"
+                                    placeholder='{"id": "12345"}'>${escapeHtml(saved.request || '')}</textarea>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-700 mb-1">Sample output returned by this connector</label>
+                                <textarea data-sample-field="response" rows="6"
+                                    class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 font-mono text-sm"
+                                    placeholder='{"status": 200, "name": "mike"}'>${escapeHtml(saved.response || '')}</textarea>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            container.querySelectorAll('textarea[data-sample-field]').forEach(input => {
+                input.addEventListener('input', () => {
+                    saveConnectorSampleDrafts();
+                    renderGenerationReview();
+                });
+            });
+        }
+
+        function getSelectedFlowDetails() {
+            if (!analyzedFlowSelection) return null;
+            const selected = getSelectedFlows()[0];
+            const flows = (analyzedFlowSelection.recommended_flows || []).concat(analyzedFlowSelection.all_flows || []);
+            return flows.find(flow => flow.name === selected) || null;
+        }
+
+        function saveConnectorSampleDrafts() {
+            document.querySelectorAll('[data-connector-sample]').forEach(card => {
+                const id = card.getAttribute('data-connector-sample');
+                if (!id) return;
+                connectorSampleValues[id] = connectorSampleValues[id] || {};
+                card.querySelectorAll('[data-sample-field]').forEach(input => {
+                    connectorSampleValues[id][input.getAttribute('data-sample-field')] = input.value;
+                });
+            });
+        }
+
+        function collectConnectorSamples() {
+            saveConnectorSampleDrafts();
+            const samples = [];
+            const flows = (analyzedFlowSelection?.recommended_flows || []).concat(analyzedFlowSelection?.all_flows || []);
+            const connectorById = {};
+            flows.forEach(flow => (flow.mock_connectors || []).forEach(connector => {
+                connectorById[connector.id] = connector;
+            }));
+            Object.entries(connectorSampleValues).forEach(([id, value]) => {
+                const connector = connectorById[id];
+                if (!connector) return;
+                const request = (value.request || '').trim();
+                const response = (value.response || '').trim();
+                if (!request && !response) return;
+                samples.push({
+                    id,
+                    flow: connector.flow,
+                    processor: connector.processor,
+                    doc_name: connector.doc_name,
+                    media_type: connector.media_type,
+                    request,
+                    response
+                });
+            });
+            return samples;
+        }
+
+        function renderGenerationReview() {
+            const review = document.getElementById('generationReview');
+            const hint = document.getElementById('generationReviewHint');
+            if (!review || !hint) return;
+            const flow = getSelectedFlowDetails();
+            if (!flow) {
+                review.classList.add('hidden');
+                hint.classList.remove('hidden');
+                return;
+            }
+
+            saveConnectorSampleDrafts();
+            const connectors = flow.mock_connectors || [];
+            const missingSamples = connectors.filter(connector => {
+                const value = connectorSampleValues[connector.id] || {};
+                return !(value.response || '').trim();
+            });
+            const scenarios = flow.planned_scenarios || [];
+            const scenarioRows = scenarios.length
+                ? scenarios.map(item => `
+                    <tr class="border-t border-gray-200">
+                        <td class="py-2 pr-3 font-medium text-gray-800">${escapeHtml(item.type || item.name || 'scenario')}</td>
+                        <td class="py-2 pr-3 text-gray-700">${escapeHtml(item.description || '')}</td>
+                        <td class="py-2 text-gray-600">${escapeHtml(item.assertion_strategy || '')}${item.expected_error_type ? ` · ${escapeHtml(item.expected_error_type)}` : ''}</td>
+                    </tr>
+                `).join('')
+                : '<tr><td class="py-2 text-gray-500" colspan="3">No scenario plan available yet.</td></tr>';
+
+            review.innerHTML = `
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <div class="text-xs uppercase tracking-wide text-gray-500">Selected Parent Flow</div>
+                        <div class="font-semibold text-gray-900">${escapeHtml(flow.display_name || flow.name)}</div>
+                        <div class="text-xs text-gray-500 mt-1">${escapeHtml(flow.source_file || 'unknown.xml')}</div>
+                    </div>
+                    <div>
+                        <div class="text-xs uppercase tracking-wide text-gray-500">Assertion Strategy</div>
+                        <div class="font-semibold text-gray-900">${escapeHtml(flow.assertion_strategy || 'Payload equality')}</div>
+                        <div class="text-xs text-gray-500 mt-1">${escapeHtml((flow.error_handlers || []).length ? `Error handlers: ${flow.error_handlers.join(', ')}` : 'No explicit error handler detected')}</div>
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+                    <div class="bg-white border border-gray-200 rounded p-3">
+                        <div class="text-xs text-gray-500">Connectors to mock</div>
+                        <div class="text-xl font-semibold text-gray-900">${connectors.length}</div>
+                    </div>
+                    <div class="bg-white border border-gray-200 rounded p-3">
+                        <div class="text-xs text-gray-500">Missing sample responses</div>
+                        <div class="text-xl font-semibold ${missingSamples.length ? 'text-amber-700' : 'text-green-700'}">${missingSamples.length}</div>
+                    </div>
+                    <div class="bg-white border border-gray-200 rounded p-3">
+                        <div class="text-xs text-gray-500">Planned scenarios</div>
+                        <div class="text-xl font-semibold text-gray-900">${scenarios.length}</div>
+                    </div>
+                </div>
+                ${missingSamples.length ? `
+                    <div class="mb-4 bg-amber-50 border border-amber-200 rounded p-3 text-sm text-amber-800">
+                        Missing sample output for: ${missingSamples.map(item => escapeHtml(item.display_name || item.doc_name)).join(', ')}. The backend will infer these mock files.
+                    </div>
+                ` : ''}
+                <div class="overflow-x-auto bg-white border border-gray-200 rounded">
+                    <table class="w-full text-sm">
+                        <thead>
+                            <tr class="text-left text-xs uppercase text-gray-500">
+                                <th class="py-2 pr-3 pl-3">Scenario</th>
+                                <th class="py-2 pr-3">Why</th>
+                                <th class="py-2 pr-3">Validation</th>
+                            </tr>
+                        </thead>
+                        <tbody>${scenarioRows}</tbody>
+                    </table>
+                </div>
+            `;
+            review.classList.remove('hidden');
+            hint.classList.add('hidden');
         }
 
         // ── POM dependency banner ─────────────────────────────────────────────

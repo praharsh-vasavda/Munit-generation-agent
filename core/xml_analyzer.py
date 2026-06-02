@@ -260,6 +260,9 @@ class XMLAnalyzer:
             error_handlers = set()
             dwl_refs = set()
             inline_dwl_scripts = []
+            branch_points = []
+            variable_writes = []
+            error_handler_details = []
 
             for index, child in enumerate(element.iter()):
                 child_name = self._local_tag_name(child.tag)
@@ -293,6 +296,21 @@ class XMLAnalyzer:
 
                 if child_name.startswith("on-error"):
                     error_handlers.add(child_name)
+                    error_handler_details.append(self._extract_error_handler_detail(child, child_name))
+
+                if child_name == "choice":
+                    branch_points.extend(self._extract_choice_branches(child))
+
+                if child_name == "set-variable":
+                    value = child.attrib.get("value", "")
+                    inline_value = self._extract_inline_dwl(child)
+                    variable_writes.append({
+                        "name": child.attrib.get("variableName") or child.attrib.get("target"),
+                        "value": value,
+                        "dwl_excerpt": (inline_value or {}).get("script", ""),
+                        "value_type": self._infer_expression_type(value or (inline_value or {}).get("script", "")),
+                        "doc_name": self._get_documentation_name(child),
+                    })
 
                 dwl_path = self._extract_dwl_resource_reference(child)
                 if dwl_path:
@@ -322,6 +340,9 @@ class XMLAnalyzer:
                 "connectors": sorted(connectors),
                 "http_requests": http_endpoints,
                 "error_handlers": sorted(error_handlers),
+                "error_handler_details": error_handler_details[:6],
+                "branch_points": branch_points[:8],
+                "variable_writes": variable_writes[:12],
                 "trigger": trigger_processor,
                 "final_processor": final_processor,
                 "dwl_files": sorted(dwl_refs),
@@ -345,7 +366,7 @@ class XMLAnalyzer:
 
         for attr_key in (
             "name", "path", "method", "allowedMethods", "config-ref",
-            "value", "variableName", "ref", "url",
+            "value", "variableName", "ref", "url", "expression",
         ):
             if attr_key in element.attrib:
                 metadata[attr_key.replace("-", "_")] = element.attrib.get(attr_key)
@@ -360,6 +381,53 @@ class XMLAnalyzer:
             metadata["dwl_excerpt"] = inline_dwl.get("script", "")[:1200]
 
         return metadata
+
+    def _extract_choice_branches(self, choice_element: ET.Element) -> List[Dict]:
+        """Extract high-level choice branch conditions for scenario planning."""
+        branches = []
+        branch_index = 0
+        for child in list(choice_element):
+            child_name = self._local_tag_name(child.tag)
+            if child_name not in {"when", "otherwise"}:
+                continue
+            branch_index += 1
+            condition = child.attrib.get("expression", "") if child_name == "when" else "otherwise"
+            branches.append({
+                "type": child_name,
+                "condition": condition,
+                "description": f"{child_name} branch {branch_index}: {condition or 'otherwise'}",
+            })
+        return branches
+
+    def _extract_error_handler_detail(self, element: ET.Element, child_name: str) -> Dict:
+        """Capture enough error-handler detail to plan failure assertions."""
+        return {
+            "type": child_name,
+            "doc_name": self._get_documentation_name(element),
+            "error_type": element.attrib.get("type", ""),
+            "enable_notifications": element.attrib.get("enableNotifications", ""),
+            "dwl_excerpt": (self._extract_inline_dwl(element) or {}).get("script", ""),
+        }
+
+    def _infer_expression_type(self, expression: str) -> str:
+        """Best-effort type label for variable and route planning."""
+        text = (expression or "").strip()
+        body = text.split("---", 1)[1].strip() if "---" in text else text
+        if not body:
+            return "unknown"
+        if re.search(r"\b(?:map|filter|flatMap|pluck|distinctBy|orderBy)\b", body) or body.startswith("["):
+            return "array"
+        if re.search(r"\b(?:mapObject|groupBy|reduce)\b", body) or body.startswith("{"):
+            return "object"
+        if re.match(r"^['\"].*['\"]$", body):
+            return "string"
+        if re.match(r"^\d+(?:\.\d+)?$", body):
+            return "number"
+        if body in {"true", "false"}:
+            return "boolean"
+        if body == "null":
+            return "null"
+        return "expression"
 
     def _get_documentation_name(self, element: ET.Element) -> str:
         """Extract doc:name without depending on namespace registration."""
@@ -408,10 +476,13 @@ class XMLAnalyzer:
                 continue
 
             downstream_refs = []
+            downstream_script = ""
             for later in processor_chain[index + 1:]:
                 refs = later.get("payload_references", []) or []
-                if refs:
+                script = later.get("dwl_excerpt", "") or ""
+                if refs or script:
                     downstream_refs = refs
+                    downstream_script = script
                     break
 
             item = {
@@ -421,8 +492,9 @@ class XMLAnalyzer:
                 "match_value": processor.get("doc_name") or processor.get("config_ref", ""),
                 "action": "verify-call" if processor_type in self.VOID_VERIFY_PROCESSORS else "mock-when",
                 "downstream_payload_references": downstream_refs[:12],
+                "downstream_dwl_excerpt": downstream_script[:1200],
                 "media_type": self._default_media_type_for_processor(processor_type),
-                "result_shape": self._default_result_shape_for_processor(processor_type),
+                "result_shape": self._infer_result_shape_for_processor(processor_type, downstream_script),
             }
 
             if processor_type == "http:request":
@@ -452,6 +524,29 @@ class XMLAnalyzer:
         if processor_type in self.VOID_VERIFY_PROCESSORS:
             return "void"
         return "object"
+
+    def _infer_result_shape_for_processor(self, processor_type: str, downstream_script: str = "") -> str:
+        """Infer connector result shape from the next DataWeave consumer."""
+        default_shape = self._default_result_shape_for_processor(processor_type)
+        script = self._strip_dwl_header(downstream_script or "")
+
+        if re.search(r"\bpayload\s+(?:mapObject|groupBy|reduce)\b", script):
+            return "object"
+        if re.search(r"\bpayload\s+(?:map|filter|flatMap|distinctBy|orderBy)\b", script):
+            return "array"
+        if re.search(r"\bpayload\s+pluck\b", script):
+            return "array"
+        if re.search(r"\bpayload\s*\[[^\]]+\]", script):
+            return "array"
+        if re.search(r"^\s*\{", script):
+            return "object"
+        if re.search(r"^\s*\[", script):
+            return "array"
+        return default_shape
+
+    def _strip_dwl_header(self, script: str) -> str:
+        """Return the executable body portion of a DWL script."""
+        return script.split("---", 1)[1].strip() if "---" in script else script.strip()
 
     def _build_processor_summary(self, metadata: Dict) -> str:
         """Create a compact human-readable summary for prompts."""
@@ -778,6 +873,9 @@ class XMLAnalyzer:
                 "parents": [],
                 "connectors": list(detail.get("connectors", [])),
                 "error_handlers": list(detail.get("error_handlers", [])),
+                "error_handler_details": list(detail.get("error_handler_details", [])),
+                "branch_points": list(detail.get("branch_points", [])),
+                "variable_writes": list(detail.get("variable_writes", [])),
                 "http_requests": list(detail.get("http_requests", [])),
                 "processors": list(detail.get("processors", [])),
                 "processor_chain": list(detail.get("processor_chain", [])),
@@ -803,6 +901,9 @@ class XMLAnalyzer:
                         "parents": [],
                         "connectors": [],
                         "error_handlers": [],
+                        "error_handler_details": [],
+                        "branch_points": [],
+                        "variable_writes": [],
                         "http_requests": [],
                         "processors": [],
                         "processor_chain": [],
@@ -848,6 +949,9 @@ class XMLAnalyzer:
 
             inherited_connectors = set(node.get("connectors", []))
             inherited_error_handlers = set(node.get("error_handlers", []))
+            inherited_error_handler_details = list(node.get("error_handler_details", []))
+            inherited_branch_points = list(node.get("branch_points", []))
+            inherited_variable_writes = list(node.get("variable_writes", []))
             inherited_dwl_files = set(node.get("dwl_files", []))
             inherited_payload_refs = list(node.get("payload_references", []))
             inline_dwl = list(node.get("inline_dwl", []))
@@ -868,6 +972,9 @@ class XMLAnalyzer:
                 child_node = flow_graph.get(child, {})
                 inherited_connectors.update(child_node.get("connectors", []))
                 inherited_error_handlers.update(child_node.get("error_handlers", []))
+                inherited_error_handler_details.extend(child_node.get("error_handler_details", []))
+                inherited_branch_points.extend(child_node.get("branch_points", []))
+                inherited_variable_writes.extend(child_node.get("variable_writes", []))
                 inherited_dwl_files.update(child_node.get("dwl_files", []))
                 inline_dwl.extend(child_node.get("inline_dwl", []))
                 inherited_mock_plan.extend(child_node.get("mock_plan", []))
@@ -896,6 +1003,9 @@ class XMLAnalyzer:
                 "related_flows": related_flows,
                 "connectors": sorted(inherited_connectors),
                 "error_handlers": sorted(inherited_error_handlers),
+                "error_handler_details": inherited_error_handler_details[:8],
+                "branch_points": inherited_branch_points[:8],
+                "variable_writes": inherited_variable_writes[:16],
                 "http_requests": node.get("http_requests", []),
                 "processors": node.get("processors", []),
                 "processor_chain": node.get("processor_chain", []),

@@ -327,7 +327,7 @@ class MUnitWriter:
         media_type: str,
         raw_resource: bool = False,
     ) -> Optional[str]:
-        """Convert a simple inline Mule expression payload into a standalone DWL file."""
+        """Convert a simple inline Mule expression payload into a raw resource file."""
         expression = expression.strip()
         if not expression.startswith("#[") or not expression.endswith("]"):
             return None
@@ -336,16 +336,7 @@ class MUnitWriter:
         if not inner:
             return None
 
-        if raw_resource:
-            return inner + "\n"
-
-        output_type = "application/java" if "java" in media_type else "application/json"
-        return "\n".join([
-            "%dw 2.0",
-            f"output {output_type}",
-            "---",
-            inner
-        ])
+        return inner + "\n"
 
     def validate_munit_structure(self, content: str) -> Dict:
         """

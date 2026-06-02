@@ -10,6 +10,7 @@ Unified implementation with:
 
 import os
 import json
+import re
 import tempfile
 import logging
 import urllib.error
@@ -169,11 +170,14 @@ class WebMUnitGenerator:
             # Step 5-7: Build targeted prompts, generate, and write per-flow MUnits
             active_jobs[job_id].update({'progress': 50, 'message': 'Generating per-flow MUnit suites...'})
             target_munit_version = (params.get("target_munit_version") or "").strip() or None
+            if not target_munit_version:
+                target_munit_version = (params.get("build_validation", {}) or {}).get("munit_version")
             generation_outputs = self._generate_targeted_munits(
                 flow_summary,
                 scenario_map,
                 scenarios,
                 sample_payloads=self._build_sample_payloads_dict(params),
+                connector_samples=self._build_connector_samples_dict(params),
                 target_munit_version=target_munit_version,
                 generation_mode=params.get("generation_mode"),
             )
@@ -379,11 +383,14 @@ class WebMUnitGenerator:
             # Step 5-7: Build targeted prompts, generate, and write per-flow MUnits
             active_jobs[job_id].update({'progress': 50, 'message': 'Generating per-flow MUnit suites...'})
             target_munit_version = (params.get("target_munit_version") or "").strip() or None
+            if not target_munit_version:
+                target_munit_version = (params.get("build_validation", {}) or {}).get("munit_version")
             generation_outputs = self._generate_targeted_munits(
                 flow_summary,
                 scenario_map,
                 scenarios,
                 sample_payloads=self._build_sample_payloads_dict(params),
+                connector_samples=self._build_connector_samples_dict(params),
                 target_munit_version=target_munit_version,
                 generation_mode=params.get("generation_mode"),
             )
@@ -493,6 +500,7 @@ class WebMUnitGenerator:
         scenario_map: dict,
         document_context: dict = None,
         sample_payloads: dict = None,
+        connector_samples: dict = None,
         target_munit_version: Optional[str] = None,
         generation_mode: Optional[str] = None,
     ) -> list:
@@ -515,6 +523,7 @@ class WebMUnitGenerator:
         )
         flow_contexts = flow_summary.get("flow_contexts", {})
         sample_payloads = sample_payloads or {}
+        connector_samples = connector_samples or {}
         resolved_mode = self._resolve_generation_mode(generation_mode, sample_payloads)
 
         # Reset token tracking for this generation session
@@ -540,7 +549,9 @@ class WebMUnitGenerator:
                     flow_context,
                     generation_mode=mode,
                     sample_payload=sample_payload,
+                    connector_samples=connector_samples.get(target_flow, {}),
                     scenarios=target_scenarios,
+                    target_munit_version=target_munit_version,
                 )
                 validation = self.semantic_validator.validate(munit_xml, flow_context)
                 maven_paths = self.deterministic_builder.write_maven_layout(munit_xml, build_metadata)
@@ -556,6 +567,9 @@ class WebMUnitGenerator:
                     "semantic_validation": validation,
                     "maven_layout_paths": maven_paths,
                     "resource_files": build_metadata.get("resource_files", {}),
+                    "scenario_plan": build_metadata.get("scenario_plan", []),
+                    "preflight_validation": build_metadata.get("preflight_validation", {}),
+                    "target_munit_version": build_metadata.get("target_munit_version"),
                     "generation_time": 0.0,
                     "failures": validation.get("errors", []),
                 }
@@ -1192,6 +1206,12 @@ class WebMUnitGenerator:
                 "source_file": context.get("source_file", "unknown.xml"),
                 "trigger": trigger or "internal",
                 "connectors": context.get("connectors", []),
+                "mock_connectors": self._build_mock_connector_payload(flow_name, context),
+                "planned_scenarios": self._build_flow_scenario_preview(context),
+                "assertion_strategy": self._describe_assertion_strategy(context),
+                "branch_points": context.get("branch_points", []),
+                "variable_writes": context.get("variable_writes", []),
+                "error_handlers": context.get("error_handlers", []),
                 "child_flows": context.get("child_flows", []),
                 "parent_flows": context.get("parent_flows", []),
                 "recommended": is_recommended,
@@ -1206,6 +1226,69 @@ class WebMUnitGenerator:
             "recommended_flows": recommended_flows,
             "all_flows": all_flows
         }
+
+    def _build_mock_connector_payload(self, flow_name: str, context: dict) -> list:
+        """Return UI-friendly outbound connector sample prompts for a flow."""
+        connectors = []
+        for index, item in enumerate(context.get("mock_plan", []) or [], start=1):
+            if item.get("action") != "mock-when":
+                continue
+            processor = item.get("processor", "connector")
+            doc_name = item.get("doc_name") or item.get("match_value") or processor
+            connectors.append({
+                "id": self._connector_sample_key(flow_name, item),
+                "flow": flow_name,
+                "processor": processor,
+                "doc_name": doc_name,
+                "match_attribute": item.get("match_attribute", "doc:name"),
+                "match_value": item.get("match_value") or doc_name,
+                "media_type": item.get("media_type", "application/json"),
+                "result_shape": item.get("result_shape", "object"),
+                "display_name": f"{doc_name} ({processor})",
+                "position": index,
+            })
+        return connectors
+
+    def _build_flow_scenario_preview(self, context: dict) -> list:
+        """Return the backend scenario plan shown before generation."""
+        scenarios = self.deterministic_builder._build_scenario_plan(
+            context,
+            scenarios=context.get("scenarios") or None,
+            generation_mode="recorder",
+        )
+        return [
+            {
+                "name": item.get("name"),
+                "type": item.get("type"),
+                "description": item.get("description"),
+                "assertion_strategy": item.get("assertion_strategy", "payload_equals_expected"),
+                "expected_error_type": item.get("expected_error_type"),
+                "failed_processor": item.get("failed_processor"),
+                "empty_result_shape": item.get("empty_result_shape"),
+                "branch_condition": item.get("branch_condition"),
+            }
+            for item in scenarios
+        ]
+
+    def _describe_assertion_strategy(self, context: dict) -> str:
+        """Describe how the deterministic builder will validate the final response."""
+        final_processor = context.get("final_processor", {}) or {}
+        if final_processor.get("dwl_excerpt"):
+            return "Final DataWeave response equality"
+        if context.get("mock_plan"):
+            return "Passthrough connector response equality"
+        if context.get("output_fields"):
+            return "Derived output field equality"
+        return "Fallback response equality"
+
+    def _connector_sample_key(self, flow_name: str, mock_item: dict) -> str:
+        """Stable key used by UI and builder to attach samples to connectors."""
+        raw = "|".join([
+            flow_name or "",
+            mock_item.get("processor", ""),
+            mock_item.get("match_value") or mock_item.get("doc_name") or "",
+        ])
+        return re.sub(r"[^A-Za-z0-9_.:-]+", "_", raw).strip("_")
 
     def _build_flow_display_name(self, flow_name: str, trigger_type: str, trigger_name: str) -> str:
         """Build a friendlier flow label for the UI."""
@@ -1328,14 +1411,43 @@ class WebMUnitGenerator:
         """
         Build a {flow_name: payload_text} dict from request params.
 
-        The UI sends the sample payload as 'sample_payload' (a plain text field).
-        Because the user selects a single flow at a time, we store it under the
-        '_all' key so it is applied to whichever flow is being generated.
+        Kept for backward-compatible API callers. The UI now sends connector
+        samples separately via connector_samples.
         """
         raw = (params.get("sample_payload") or "").strip()
         if not raw:
             return {}
         return {"_all": raw}
+
+    def _build_connector_samples_dict(self, params: dict) -> dict:
+        """Build {flow: {connector_key: sample}} from connector_samples JSON."""
+        raw = (params.get("connector_samples") or "").strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+
+        samples = {}
+        if not isinstance(parsed, list):
+            return samples
+
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            flow = (item.get("flow") or "").strip()
+            key = (item.get("id") or "").strip()
+            request_text = (item.get("request") or "").strip()
+            response_text = (item.get("response") or "").strip()
+            if not flow or not key or not (request_text or response_text):
+                continue
+            samples.setdefault(flow, {})[key] = {
+                "request": request_text,
+                "response": response_text,
+                "media_type": item.get("media_type") or "application/json",
+            }
+        return samples
 
 
 # Initialize generator
