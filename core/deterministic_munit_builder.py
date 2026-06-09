@@ -171,6 +171,7 @@ class DeterministicMUnitBuilder:
 
             for item in mock_plan[:3]:
                 processor = item.get("processor", "")
+                assertion_strategy = self._error_handler_assertion_strategy(flow_context) if has_error_handler else "expected_error"
                 planned.append({
                     "name": f"{self._slugify(item.get('doc_name') or processor)}_failure",
                     "type": "downstream_failure",
@@ -178,7 +179,8 @@ class DeterministicMUnitBuilder:
                     "failed_processor": processor,
                     "failed_match_value": item.get("match_value") or item.get("doc_name"),
                     "expected_error_type": self._error_type_for_processor(processor),
-                    "assertion_strategy": "error_handler_response" if has_error_handler else "expected_error",
+                    "assertion_strategy": assertion_strategy,
+                    "verify_error_handler": has_error_handler,
                 })
 
         return self._dedupe_scenarios(planned)
@@ -206,6 +208,32 @@ class DeterministicMUnitBuilder:
                 return True
         for processor in flow_context.get("processors", []) or []:
             if str(processor).startswith(prefix):
+                return True
+        return False
+
+    def _error_handler_assertion_strategy(self, flow_context: Dict[str, Any]) -> str:
+        """Use payload assertions only when the handler actually builds a response."""
+        for handler in flow_context.get("error_handler_details", []) or []:
+            if self._error_handler_has_response_logic(handler):
+                return "error_handler_response"
+        return "expected_error"
+
+    def _error_handler_has_response_logic(self, handler: Dict[str, Any]) -> bool:
+        if handler.get("dwl_excerpt") or handler.get("dwl_excerpts"):
+            return True
+
+        response_processors = {
+            "ee:transform",
+            "transform",
+            "set-payload",
+        }
+        for processor in handler.get("processors", []) or []:
+            processor_type = processor.get("type") or ""
+            if processor_type in response_processors:
+                return True
+            if processor_type.endswith(":transform") or processor_type.endswith(":set-payload"):
+                return True
+            if processor.get("dwl_excerpt"):
                 return True
         return False
 
@@ -387,15 +415,6 @@ class DeterministicMUnitBuilder:
             match_attr = item.get("match_attribute", "doc:name")
             match_value = item.get("match_value") or doc_name
 
-            mock_file = f"mock_{self._slugify(doc_name)}_{index}_{mock_index}.dwl"
-            sample = connector_samples.get(self._connector_sample_key(flow_context.get("target_flow", ""), item), {})
-            mock_body = self._build_mock_payload_dwl(item, scenario_type, flow_context, sample=sample, scenario=scenario)
-            files[mock_file] = mock_body
-            mock_media_type = self._infer_resource_media_type(
-                mock_body,
-                sample.get("media_type") or item.get("media_type"),
-            )
-
             if scenario_type in {"downstream_failure", "downstream_api_failure", "error_scenario"} and self._is_failed_mock_for_scenario(item, scenario):
                 error_type = self._expected_error_type(scenario) or self._error_type_for_processor(processor)
                 parts.append(
@@ -410,6 +429,14 @@ class DeterministicMUnitBuilder:
                 )
                 continue
 
+            mock_file = f"mock_{self._slugify(doc_name)}_{index}_{mock_index}.dwl"
+            sample = connector_samples.get(self._connector_sample_key(flow_context.get("target_flow", ""), item), {})
+            mock_body = self._build_mock_payload_dwl(item, scenario_type, flow_context, sample=sample, scenario=scenario)
+            files[mock_file] = mock_body
+            mock_media_type = self._infer_resource_media_type(
+                mock_body,
+                sample.get("media_type") or item.get("media_type"),
+            )
             attrs = item.get("return_attributes") or {"statusCode": 200}
             attrs_file = f"mock_{self._slugify(doc_name)}_{index}_{mock_index}_attributes.dwl"
             files[attrs_file] = self._build_mock_resource_content(attrs)
@@ -429,24 +456,66 @@ class DeterministicMUnitBuilder:
 
     def _build_verify_calls(self, flow_context: Dict[str, Any], scenario: Dict[str, Any]) -> str:
         """Generate validation-time verify-call blocks for side-effect connectors."""
-        if scenario.get("type") in {"downstream_failure", "downstream_api_failure", "error_scenario", "validation_error", "invalid_input", "empty_payload"}:
-            return ""
         parts = []
-        for item in flow_context.get("mock_plan", []) or []:
-            if item.get("action") != "verify-call":
-                continue
-            processor = item.get("processor", "")
-            doc_name = item.get("doc_name") or item.get("match_value") or processor
-            match_attr = item.get("match_attribute", "doc:name")
-            match_value = item.get("match_value") or doc_name
-            parts.append(
-                f"""            <munit-tools:verify-call doc:name="Verify {self._xml_escape(doc_name)}" processor="{processor}" times="1">
+        error_scenario = scenario.get("type") in {
+            "downstream_failure",
+            "downstream_api_failure",
+            "error_scenario",
+            "validation_error",
+            "invalid_input",
+            "empty_payload",
+        }
+
+        if not error_scenario:
+            for item in flow_context.get("mock_plan", []) or []:
+                if item.get("action") != "verify-call":
+                    continue
+                parts.append(self._verify_call_xml(
+                    item.get("processor", ""),
+                    item.get("doc_name") or item.get("match_value") or item.get("processor", ""),
+                    item.get("match_attribute", "doc:name"),
+                    item.get("match_value") or item.get("doc_name") or item.get("processor", ""),
+                ))
+
+        if scenario.get("verify_error_handler") or error_scenario:
+            parts.extend(self._build_error_handler_verify_calls(flow_context))
+        return "\n".join(parts)
+
+    def _build_error_handler_verify_calls(self, flow_context: Dict[str, Any]) -> List[str]:
+        """Verify side-effect processors that are actually implemented in error handlers."""
+        verifiable_processors = {
+            "logger",
+            "anypoint-mq:publish",
+            "kafka:producer",
+            "email:send",
+            "sftp:write",
+            "file:write",
+            "jms:publish",
+            "vm:publish",
+            "objectstore:store",
+            "objectstore:remove",
+        }
+        parts: List[str] = []
+        seen = set()
+        for handler in flow_context.get("error_handler_details", []) or []:
+            for processor in handler.get("processors", []) or []:
+                processor_type = processor.get("type") or ""
+                if processor_type not in verifiable_processors:
+                    continue
+                doc_name = processor.get("doc_name") or processor_type
+                key = (processor_type, doc_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                parts.append(self._verify_call_xml(processor_type, doc_name, "doc:name", doc_name))
+        return parts
+
+    def _verify_call_xml(self, processor: str, doc_name: str, match_attr: str, match_value: str) -> str:
+        return f"""            <munit-tools:verify-call doc:name="Verify {self._xml_escape(doc_name)}" processor="{processor}" times="1">
                 <munit-tools:with-attributes>
                     <munit-tools:with-attribute attributeName="{match_attr}" whereValue="{self._xml_escape(match_value)}"/>
                 </munit-tools:with-attributes>
             </munit-tools:verify-call>"""
-            )
-        return "\n".join(parts)
 
     def _build_validation(
         self,

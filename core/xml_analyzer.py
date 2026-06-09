@@ -516,12 +516,30 @@ class XMLAnalyzer:
 
     def _extract_error_handler_detail(self, element: ET.Element, child_name: str) -> Dict:
         """Capture enough error-handler detail to plan failure assertions."""
+        handler_processors = []
+        dwl_excerpts = []
+        for index, child in enumerate(element.iter()):
+            if child is element:
+                continue
+            processor_name = self._local_tag_name(child.tag)
+            processor_meta = self._extract_processor_metadata(child, processor_name, index)
+            if processor_meta:
+                handler_processors.append(processor_meta)
+                if processor_meta.get("dwl_excerpt"):
+                    dwl_excerpts.append(processor_meta["dwl_excerpt"])
+
+        handler_dwl = (self._extract_inline_dwl(element) or {}).get("script", "")
+        if handler_dwl:
+            dwl_excerpts.insert(0, handler_dwl)
+
         return {
             "type": child_name,
             "doc_name": self._get_documentation_name(element),
             "error_type": element.attrib.get("type", ""),
             "enable_notifications": element.attrib.get("enableNotifications", ""),
-            "dwl_excerpt": (self._extract_inline_dwl(element) or {}).get("script", ""),
+            "dwl_excerpt": dwl_excerpts[0] if dwl_excerpts else "",
+            "dwl_excerpts": dwl_excerpts[:6],
+            "processors": handler_processors[:12],
         }
 
     def _infer_expression_type(self, expression: str) -> str:

@@ -657,6 +657,7 @@ output application/json
     assert context["branch_points"][1]["type"] == "otherwise"
     assert context["variable_writes"][0]["name"] == "kind"
     assert context["error_handler_details"][0]["type"] == "on-error-continue"
+    assert context["error_handler_details"][0]["processors"][0]["type"] == "ee:transform"
 
 
 def test_error_handler_failure_uses_payload_assertion_not_expected_error(tmp_path):
@@ -696,6 +697,50 @@ def test_error_handler_failure_uses_payload_assertion_not_expected_error(tmp_pat
     assert "Assert error response" in suite_xml
     assert_assert_module(failure_assert, '"status": "ERROR"')
     assert '"message": "backend failed"' in failure_assert
+
+
+def test_logger_only_error_handler_uses_expected_error_and_verify_call(tmp_path):
+    builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
+    flow_context = {
+        "target_flow": "loggerErrorFlow",
+        "error_handlers": ["on-error-propagate"],
+        "error_handler_details": [
+            {
+                "type": "on-error-propagate",
+                "processors": [
+                    {
+                        "type": "logger",
+                        "doc_name": "Log Backend Error",
+                    }
+                ],
+            }
+        ],
+        "set_event_plan": {
+            "payload_expression": '""',
+            "payload_media_type": "application/java",
+            "attributes_template": {"method": "GET", "requestPath": "/logger-error"},
+        },
+        "mock_plan": [
+            {
+                "action": "mock-when",
+                "processor": "http:request",
+                "doc_name": "Call Backend",
+                "match_attribute": "doc:name",
+                "match_value": "Call Backend",
+                "return_attributes": {"statusCode": 200},
+                "media_type": "application/json",
+            }
+        ],
+    }
+
+    suite_xml, metadata = builder.build_suite(flow_context, generation_mode="recorder")
+
+    assert 'expectedErrorType="HTTP:CONNECTIVITY"' in suite_xml
+    assert "Assert error response" not in suite_xml
+    assert "assert_expression_payload_3.dwl" not in metadata["resource_files"]
+    assert "mock_call_backend_3_1.dwl" not in metadata["resource_files"]
+    assert 'processor="logger"' in suite_xml
+    assert 'whereValue="Log Backend Error"' in suite_xml
 
 
 def test_empty_downstream_array_scenario_returns_empty_array(tmp_path):
