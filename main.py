@@ -188,7 +188,11 @@ def generate(
         console.print("[blue]Parsing business use case...[/blue]")
         scenarios = doc_parser.parse_document(usecase_content, flow_summary["job_type"])
         
-        scenario_map = doc_parser.map_scenarios_to_flows(scenarios["scenarios"], flow_summary)
+        scenario_map = (
+            doc_parser.map_scenarios_to_flows(scenarios["scenarios"], flow_summary)
+            if usecase_content and usecase_content.strip()
+            else {}
+        )
 
         if mode in {"deterministic", "recorder"}:
             console.print(f"[blue]Generating per-flow MUnit suites ({mode})...[/blue]")

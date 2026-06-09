@@ -163,6 +163,7 @@ class PromptBuilder:
             "",
             "### What gets MOCKED (external systems that would make real calls):",
             "- http:request (outbound HTTP calls)",
+            "- wsc:consume (outbound SOAP/Web Service Consumer calls)",
             "- db:select, db:insert, db:update, db:delete (database)",
             "- salesforce:query, salesforce:create, etc. (Salesforce)",
             "- s3:*, azure:*, etc. (cloud storage)",

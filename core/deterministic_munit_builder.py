@@ -330,7 +330,7 @@ class DeterministicMUnitBuilder:
             return (
                 f"""            <munit:set-event doc:name="Set Input">
                 <munit:payload value="#[MunitTools::getResourceAsString('{resource_folder}/{payload_file}')]" mediaType="{payload_media_type}" encoding="UTF-8"/>
-                <munit:attributes value="#[MunitTools::getResourceAsString('{resource_folder}/{attrs_file}')]" mediaType="{attributes_media_type}"/>
+                <munit:attributes value="#[read(MunitTools::getResourceAsString('{resource_folder}/{attrs_file}'), 'application/json')]" mediaType="{attributes_media_type}"/>
             </munit:set-event>""",
                 files,
             )
@@ -353,7 +353,7 @@ class DeterministicMUnitBuilder:
         return (
             f"""            <munit:set-event doc:name="Set Input">
                 <munit:payload value="#[MunitTools::getResourceAsString('{resource_folder}/{payload_file}')]" mediaType="{payload_media_type}" encoding="UTF-8"/>
-                <munit:attributes value="#[MunitTools::getResourceAsString('{resource_folder}/{attrs_file}')]" mediaType="{attributes_media_type}"/>
+                <munit:attributes value="#[read(MunitTools::getResourceAsString('{resource_folder}/{attrs_file}'), 'application/json')]" mediaType="{attributes_media_type}"/>
             </munit:set-event>""",
             files,
         )
@@ -421,7 +421,7 @@ class DeterministicMUnitBuilder:
                 </munit-tools:with-attributes>
                 <munit-tools:then-return>
                     <munit-tools:payload value="#[MunitTools::getResourceAsString('{resource_folder}/{mock_file}')]" mediaType="{mock_media_type}"/>
-                    <munit-tools:attributes value="#[MunitTools::getResourceAsString('{resource_folder}/{attrs_file}')]" mediaType="{attributes_media_type}"/>
+                    <munit-tools:attributes value="#[read(MunitTools::getResourceAsString('{resource_folder}/{attrs_file}'), 'application/json')]" mediaType="{attributes_media_type}"/>
                 </munit-tools:then-return>
             </munit-tools:mock-when>"""
             )
@@ -665,21 +665,60 @@ import {resource_folder}::{module_name}
         if not request_obj:
             request_obj = {}
 
-        payload_dwl = self._build_raw_resource_content(request_obj)
+        payload_obj = self._sample_request_payload(request_obj)
+        payload_dwl = self._build_raw_resource_content(payload_obj)
 
-        attrs = plan.get("attributes_template") or {
+        attrs = json.loads(json.dumps(plan.get("attributes_template") or {
             "method": "GET",
             "requestPath": "/",
-            "queryParams": request_obj.get("queryParams", {}),
+            "queryParams": {},
             "headers": {"content-type": "application/json"},
-        }
-        if isinstance(request_obj, dict) and request_obj.get("queryParams"):
-            attrs["queryParams"] = request_obj["queryParams"]
+            "uriParams": {},
+        }))
+        self._merge_sample_request_attributes(attrs, request_obj)
 
         attrs_dwl = self._build_raw_resource_content(attrs)
 
         self._last_sample_response = response_obj
         return payload_dwl, attrs_dwl
+
+    def _sample_request_payload(self, request_obj: Any) -> Any:
+        """Return the request body portion from a recorder-style sample."""
+        if not isinstance(request_obj, dict):
+            return request_obj
+        for key in ("payload", "body"):
+            if key in request_obj:
+                return request_obj[key]
+        attribute_keys = {
+            "attributes", "headers", "queryParams", "uriParams",
+            "method", "requestPath", "path",
+        }
+        if request_obj and all(key in attribute_keys for key in request_obj):
+            return {}
+        return request_obj
+
+    def _merge_sample_request_attributes(self, attrs: Dict[str, Any], request_obj: Any) -> None:
+        """Merge request attributes from user samples into the set-event attributes."""
+        if not isinstance(request_obj, dict):
+            return
+
+        nested_attrs = request_obj.get("attributes")
+        if isinstance(nested_attrs, dict):
+            for key, value in nested_attrs.items():
+                if key in {"headers", "queryParams", "uriParams"} and isinstance(value, dict):
+                    attrs.setdefault(key, {}).update(value)
+                elif key in {"method", "requestPath", "path"}:
+                    attrs["requestPath" if key == "path" else key] = value
+
+        for key in ("headers", "queryParams", "uriParams"):
+            value = request_obj.get(key)
+            if isinstance(value, dict):
+                attrs.setdefault(key, {}).update(value)
+
+        if request_obj.get("method"):
+            attrs["method"] = request_obj["method"]
+        if request_obj.get("requestPath") or request_obj.get("path"):
+            attrs["requestPath"] = request_obj.get("requestPath") or request_obj.get("path")
 
     def _expected_output_from_sample(self, sample_payload: Optional[str]) -> Optional[Dict]:
         if not sample_payload:
@@ -702,6 +741,8 @@ import {resource_folder}::{module_name}
     ) -> Any:
         """Build a concrete dummy final response from the analyzed output shape."""
         sample_context = self._build_connector_sample_context(connector_samples)
+        if "__payload__" not in sample_context:
+            sample_context.update(self._build_generated_mock_sample_context(flow_context))
         sample_context["vars"] = self._build_variable_context(flow_context, sample_context)
         final_script = self._final_transform_script(flow_context)
         if final_script:
@@ -732,6 +773,32 @@ import {resource_folder}::{module_name}
                 context.update(parsed)
             elif isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
                 context.update(parsed[0])
+        return context
+
+    def _build_generated_mock_sample_context(self, flow_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Use the generated happy-path mock payload as context for assertion derivation."""
+        context: Dict[str, Any] = {}
+        for item in flow_context.get("mock_plan", []) or []:
+            if item.get("action") != "mock-when":
+                continue
+            raw_payload = self._build_mock_payload_dwl(
+                item,
+                "happy_path",
+                flow_context,
+                sample={},
+                scenario={"type": "happy_path"},
+            )
+            try:
+                parsed = json.loads(raw_payload)
+            except json.JSONDecodeError:
+                parsed = raw_payload.strip()
+
+            context["__payload__"] = parsed
+            if isinstance(parsed, dict):
+                context.update(parsed)
+            elif isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                context.update(parsed[0])
+            break
         return context
 
     def _build_variable_context(
@@ -848,7 +915,7 @@ import {resource_folder}::{module_name}
         sample_context: Dict[str, Any],
     ) -> Dict[str, Any]:
         expected: Dict[str, Any] = {}
-        for match in re.finditer(r'^\s*"?([A-Za-z_][\w-]*)"?\s*:\s*([^,\n\r}]+)', body, re.MULTILINE):
+        for match in re.finditer(r'^\s*"?([A-Za-z_][\w-]*)"?\s*:\s*(.+?)\s*,?\s*$', body, re.MULTILINE):
             key = match.group(1)
             expression = match.group(2).strip()
             if key in {"output", "ns", "import"}:
@@ -866,6 +933,10 @@ import {resource_folder}::{module_name}
         literal = self._parse_literal_expression(expression)
         if literal is not None:
             return literal
+
+        filter_handled, filtered = self._value_from_filter_selector_expression(expression, sample_context)
+        if filter_handled:
+            return filtered
 
         payload_match = re.search(r"\bpayload\.([A-Za-z0-9_.\[\]-]+)", expression)
         if payload_match:
@@ -889,6 +960,53 @@ import {resource_folder}::{module_name}
             return self._mock_value_for_field(vars_match.group(1).split(".")[-1])
 
         return self._mock_value_for_field(output_field)
+
+    def _value_from_filter_selector_expression(
+        self,
+        expression: str,
+        sample_context: Dict[str, Any],
+    ) -> Tuple[bool, Any]:
+        """
+        Evaluate common DWL filter+selector shapes, e.g.
+        (payload.data filter ((item) -> item.name == "India")).states[0].
+        """
+        match = re.search(
+            r"\(?\s*payload\.([A-Za-z0-9_.\[\]-]+)\s+filter\s*\(.*?\bitem\.([A-Za-z0-9_.\[\]-]+)\s*==\s*(['\"])(.*?)\3.*?\)\s*\)?\.([A-Za-z0-9_.\[\]-]+)",
+            expression,
+            re.DOTALL,
+        )
+        if not match:
+            return False, None
+
+        source_path = match.group(1)
+        filter_path = match.group(2)
+        filter_value = match.group(4)
+        selector_path = match.group(5)
+
+        source = self._resolve_path(sample_context, source_path)
+        if source is None:
+            source = self._resolve_path(sample_context.get("__payload__", {}), source_path)
+        if not isinstance(source, list):
+            return True, None
+
+        selected = []
+        for item in source:
+            value = self._resolve_path(item, filter_path) if isinstance(item, dict) else None
+            if value == filter_value:
+                selected.append(item)
+
+        if not selected:
+            return True, None
+
+        # DWL selector over an array followed by [0], such as `.states[0]`,
+        # returns the selected field from the first filtered item.
+        selector_root = selector_path.split("[", 1)[0]
+        first_value = self._resolve_path(selected[0], selector_root)
+        if first_value is not None:
+            return True, first_value
+
+        resolved = self._resolve_path(selected[0], selector_path)
+        return True, resolved
 
     def _parse_literal_expression(self, expression: str) -> Optional[Any]:
         if re.match(r"^['\"].*['\"]$", expression):
@@ -1209,6 +1327,7 @@ import {resource_folder}::{module_name}
             processor for processor in live_processors
             if processor in {
                 "http:request", "db:select", "db:insert", "db:update", "db:delete",
+                "wsc:consume",
                 "salesforce:query", "salesforce:create", "salesforce:update",
                 "file:read", "sftp:read", "jms:publish-consume", "vm:publish-consume",
                 "objectstore:retrieve",
@@ -1371,6 +1490,7 @@ def _pre_outbound_script_text(processor_chain: List[Dict], inline_dwl: List[Dict
     """Only DWL that runs before the first outbound connector (listener input)."""
     outbound_types = {
         "http:request",
+        "wsc:consume",
         "db:select",
         "db:insert",
         "db:update",
@@ -1389,6 +1509,10 @@ def _pre_outbound_script_text(processor_chain: List[Dict], inline_dwl: List[Dict
         excerpt = (proc.get("dwl_excerpt") or "").strip()
         if excerpt and excerpt not in scripts:
             scripts.append(excerpt)
+        for key in ("value", "expression"):
+            expression = (proc.get(key) or "").strip()
+            if expression and expression not in scripts:
+                scripts.append(expression)
     if scripts:
         return "\n".join(scripts)
     # Fallback when chain excerpts are missing
@@ -1412,9 +1536,18 @@ def build_set_event_plan(processor_chain: List[Dict], inline_dwl: List[Dict], tr
     }
 
     scripts = _pre_outbound_script_text(processor_chain, inline_dwl)
-    query_params = {}
-    for match in re.findall(r"attributes\.queryParams\.(\w+)", scripts):
-        query_params[match] = _mock_value_for_field_static(match)
+    query_params = {
+        field: _mock_value_for_attribute_static("queryParams", field)
+        for field in _extract_attribute_fields_static(scripts, "queryParams")
+    }
+    header_params = {
+        field: _mock_value_for_attribute_static("headers", field)
+        for field in _extract_attribute_fields_static(scripts, "headers")
+    }
+    uri_params = {
+        field: _mock_value_for_attribute_static("uriParams", field)
+        for field in _extract_attribute_fields_static(scripts, "uriParams")
+    }
 
     country_literal = re.search(r'item\.name\s*==\s*"([^"]+)"', scripts)
     if country_literal:
@@ -1424,12 +1557,16 @@ def build_set_event_plan(processor_chain: List[Dict], inline_dwl: List[Dict], tr
     if trigger_type == "http:listener":
         method = (trigger.get("method") or trigger.get("allowedMethods") or "GET").split(",")[0].strip()
         path = trigger.get("path") or trigger.get("requestPath") or "/"
+        for field in re.findall(r"\{([A-Za-z0-9_-]+)\}", path):
+            uri_params.setdefault(field, _mock_value_for_attribute_static("uriParams", field))
+        headers = {"content-type": "application/json"}
+        headers.update(header_params)
         plan["attributes_template"] = {
             "method": method,
             "requestPath": path,
             "queryParams": query_params,
-            "headers": {"content-type": "application/json"},
-            "uriParams": {},
+            "headers": headers,
+            "uriParams": uri_params,
         }
         if method.upper() == "GET" and not re.search(r"\bpayload\.", scripts[:500]):
             plan["payload_expression"] = '""'
@@ -1462,6 +1599,39 @@ def extract_output_fields(inline_dwl: List[Dict], final_processor: Dict) -> List
         if field not in ordered and field not in {"output", "ns", "import"}:
             ordered.append(field)
     return ordered[:6]
+
+
+def _extract_attribute_fields_static(text: str, attribute_group: str) -> List[str]:
+    """Extract attributes.queryParams/header/uriParams field names from DWL text."""
+    if not text:
+        return []
+
+    escaped_group = re.escape(attribute_group)
+    patterns = [
+        rf"\battributes\.{escaped_group}\.([A-Za-z_][A-Za-z0-9_-]*)",
+        rf"\battributes\.{escaped_group}\[['\"]([^'\"]+)['\"]\]",
+        rf"\battributes\.{escaped_group}\s*\[\s*['\"]([^'\"]+)['\"]\s*\]",
+    ]
+    ordered: List[str] = []
+    for pattern in patterns:
+        for match in re.findall(pattern, text):
+            if match and match not in ordered:
+                ordered.append(match)
+    return ordered
+
+
+def _mock_value_for_attribute_static(attribute_group: str, field: str) -> Any:
+    lowered = (field or "").lower()
+    if attribute_group == "headers":
+        if lowered in {"authorization", "auth", "auth-token", "access-token"}:
+            return "Bearer test-token"
+        if lowered in {"client_id", "client-id", "x-client-id"}:
+            return "test-client-id"
+        if lowered in {"client_secret", "client-secret", "x-client-secret"}:
+            return "test-client-secret"
+        if "correlation" in lowered:
+            return "test-correlation-id"
+    return _mock_value_for_field_static(field)
 
 
 def _mock_value_for_field_static(field: str) -> Any:

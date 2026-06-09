@@ -50,6 +50,7 @@ behavior_section:
   # RULE: mock-when is ONLY used for outbound connectors
   mock_when_applies_to:
     - "http:request"
+    - "wsc:consume"
     - "db:select"
     - "db:insert"
     - "db:update"

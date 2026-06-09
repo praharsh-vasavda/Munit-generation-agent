@@ -37,6 +37,15 @@ mock_strategies:
       statusCode: 500
       payload: '{"error": "Internal Server Error", "code": "SYSTEM_ERROR"}'
 
+  wsc:consume:
+    mock_type: "munit-tools:mock-when"
+    matching_attributes:
+      primary: "doc:name"
+      fallback: "config-ref"
+    payload_source: "derive_from_downstream_transform"
+    media_type: "application/xml"
+    minimal_safe_payload: "<response/>"
+
   db:select:
     mock_type: "munit-tools:mock-when"
     matching_attributes:

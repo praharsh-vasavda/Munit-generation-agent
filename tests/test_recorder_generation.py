@@ -62,9 +62,9 @@ def test_recorder_mode_uses_dwl_files_and_no_inline_connector_content(tmp_path):
     assert '"status": "ACTIVE"' in mock_payload
     assert mock_attrs == '{\n  "status": 200\n}\n'
     assert 'mediaType="application/java"' in suite_xml
-    assert '<munit:attributes value="#[MunitTools::getResourceAsString' in suite_xml
-    assert '<munit-tools:attributes value="#[MunitTools::getResourceAsString' in suite_xml
-    assert 'mock_get-customer_1_1_attributes.dwl\')]" mediaType="application/java"' in suite_xml
+    assert '<munit:attributes value="#[read(MunitTools::getResourceAsString' in suite_xml
+    assert '<munit-tools:attributes value="#[read(MunitTools::getResourceAsString' in suite_xml
+    assert "mock_get-customer_1_1_attributes.dwl'), 'application/json')]" in suite_xml
     assert set_payload == '"" as Binary {base: "64"}\n'
     assert not set_attrs.startswith("%dw 2.0")
     assert set_attrs == '{\n  "method": "GET",\n  "requestPath": "/abc/path",\n  "queryParams": {}\n}\n'
@@ -335,6 +335,60 @@ payload map (item) -> {
     assert '"id": "MOCK-001"' in mock_payload
 
 
+def test_analyzer_keeps_http_external_api_qualified_and_mocked(tmp_path):
+    mule_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation">
+  <flow name="api-flow">
+    <http:listener doc:name="Listener" path="/api/process"/>
+    <set-payload doc:name="Set Payload" value='{"status": "processed"}'/>
+    <http:request doc:name="Call external API" config-ref="HTTP_Request_config" path="/external" method="POST"/>
+  </flow>
+</mule>"""
+    analyzer = XMLAnalyzer()
+    summary = analyzer.analyze_mule_project(mule_xml)
+    flow_context = summary["flow_contexts"]["api-flow"]
+
+    assert summary["job_type"] == "REST API"
+    assert "http:listener" in flow_context["connectors"]
+    assert "http:request" in flow_context["connectors"]
+    assert flow_context["mock_plan"][0]["processor"] == "http:request"
+
+    builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
+    suite_xml, metadata = builder.build_suite(flow_context, generation_mode="recorder")
+
+    assert metadata["mock_plan_count"] == 1
+    assert '<munit-tools:mock-when doc:name="Mock Call external API" processor="http:request">' in suite_xml
+    assert 'whereValue="Call external API"' in suite_xml
+
+
+def test_analyzer_mocks_web_service_consumer_external_api(tmp_path):
+    mule_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:wsc="http://www.mulesoft.org/schema/mule/wsc"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation">
+  <flow name="soapFlow">
+    <http:listener doc:name="Listener" path="/soap"/>
+    <wsc:consume doc:name="Call SOAP API" config-ref="Web_Service_Consumer_Config" operation="getCustomer"/>
+  </flow>
+</mule>"""
+    analyzer = XMLAnalyzer()
+    summary = analyzer.analyze_mule_project(mule_xml)
+    flow_context = summary["flow_contexts"]["soapFlow"]
+
+    assert "wsc:consume" in flow_context["connectors"]
+    assert flow_context["mock_plan"][0]["processor"] == "wsc:consume"
+
+    builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
+    suite_xml, metadata = builder.build_suite(flow_context, generation_mode="recorder")
+
+    assert metadata["mock_plan_count"] == 1
+    assert '<munit-tools:mock-when doc:name="Mock Call SOAP API" processor="wsc:consume">' in suite_xml
+    assert 'whereValue="Call SOAP API"' in suite_xml
+
+
 def test_assertion_payload_is_array_when_final_transform_maps_payload(tmp_path):
     builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
     flow_context = {
@@ -434,6 +488,54 @@ def test_assertion_payload_handles_pluck_as_array(tmp_path):
     assert_payload = metadata["resource_files"]["assert_expression_payload_1.dwl"]
 
     assert_assert_module(assert_payload, '[\n  "abc"\n]')
+
+
+def test_assertion_payload_evaluates_filter_selector_from_generated_mock(tmp_path):
+    builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
+    flow_context = {
+        "target_flow": "stateFlow",
+        "set_event_plan": {
+            "payload_expression": '""',
+            "payload_media_type": "application/java",
+            "attributes_template": {
+                "method": "GET",
+                "requestPath": "/getState",
+                "queryParams": {"country": "India"},
+            },
+            "hardcoded_literals": {"filter_country": "India"},
+        },
+        "final_processor": {
+            "dwl_excerpt": """%dw 2.0
+output application/json
+---
+{
+  "states": (payload.data filter ((item, index) -> item.name == "India")).states[0]
+}"""
+        },
+        "mock_plan": [
+            {
+                "action": "mock-when",
+                "processor": "http:request",
+                "doc_name": "Request",
+                "match_attribute": "doc:name",
+                "match_value": "Request",
+                "media_type": "application/json",
+                "downstream_payload_references": ["payload.data"],
+                "result_shape": "object",
+            }
+        ],
+    }
+
+    _suite_xml, metadata = builder.build_suite(flow_context, generation_mode="recorder")
+
+    assert_assert_module(
+        metadata["resource_files"]["assert_expression_payload_1.dwl"],
+        '"states": [\n    {\n      "name": "Test State",\n      "state_code": "TS"\n    }\n  ]',
+    )
+    assert_assert_module(
+        metadata["resource_files"]["assert_expression_payload_2.dwl"],
+        '"states": null',
+    )
 
 
 def test_blueprint_mock_files_strip_dwl_header_from_llm_output(tmp_path):
@@ -651,6 +753,77 @@ def test_branch_scenario_sets_query_param_from_choice_condition(tmp_path):
 
     assert metadata["scenario_plan"][1]["type"] == "branch_path"
     assert '"kind": "premium"' in metadata["resource_files"]["set-event_attributes_2.dwl"]
+
+
+def test_set_event_attributes_include_required_headers_query_and_uri_params(tmp_path):
+    mule_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation">
+  <flow name="secureCustomerFlow">
+    <http:listener doc:name="Listener" path="/customers/{customerId}" allowedMethods="GET"/>
+    <set-variable doc:name="Read Auth" variableName="authToken" value="#[attributes.headers.authorization]"/>
+    <choice>
+      <when expression="#[attributes.queryParams.region == 'west' and attributes.uriParams.customerId != null]">
+        <set-variable variableName="region" value="#[attributes.queryParams.region]"/>
+      </when>
+    </choice>
+    <http:request doc:name="Call external API"/>
+  </flow>
+</mule>"""
+    analyzer = XMLAnalyzer()
+    summary = analyzer.analyze_mule_project(mule_xml)
+    flow_context = summary["flow_contexts"]["secureCustomerFlow"]
+
+    builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
+    _suite_xml, metadata = builder.build_suite(flow_context, generation_mode="recorder")
+    set_attrs = metadata["resource_files"]["set-event_attributes_1.dwl"]
+
+    assert '"requestPath": "/customers/{customerId}"' in set_attrs
+    assert '"authorization": "Bearer test-token"' in set_attrs
+    assert '"region": "MOCK-VALUE"' in set_attrs
+    assert '"customerId": "MOCK-001"' in set_attrs
+
+
+def test_sample_request_attributes_are_merged_into_set_event_attributes(tmp_path):
+    builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
+    flow_context = {
+        "target_flow": "secureCustomerFlow",
+        "set_event_plan": {
+            "payload_expression": '""',
+            "payload_media_type": "application/java",
+            "attributes_template": {
+                "method": "GET",
+                "requestPath": "/customers/{customerId}",
+                "queryParams": {"region": "MOCK-VALUE"},
+                "headers": {"content-type": "application/json", "authorization": "Bearer test-token"},
+                "uriParams": {"customerId": "MOCK-001"},
+            },
+        },
+        "mock_plan": [],
+    }
+    sample_payload = """{
+      "request": {
+        "headers": {"authorization": "Bearer real-test-token", "x-client-id": "client-123"},
+        "queryParams": {"region": "east"},
+        "uriParams": {"customerId": "CUST-12345"}
+      },
+      "response": {"status": "OK"}
+    }"""
+
+    _suite_xml, metadata = builder.build_suite(
+        flow_context,
+        generation_mode="recorder",
+        sample_payload=sample_payload,
+    )
+    set_payload = metadata["resource_files"]["set-event_payload_1.dwl"]
+    set_attrs = metadata["resource_files"]["set-event_attributes_1.dwl"]
+
+    assert set_payload == "{}\n"
+    assert '"authorization": "Bearer real-test-token"' in set_attrs
+    assert '"x-client-id": "client-123"' in set_attrs
+    assert '"region": "east"' in set_attrs
+    assert '"customerId": "CUST-12345"' in set_attrs
 
 
 def test_assertion_resolves_tracked_variable_values(tmp_path):

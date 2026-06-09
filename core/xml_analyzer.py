@@ -14,6 +14,7 @@ class XMLAnalyzer:
 
     EXTERNAL_MOCK_PROCESSORS = {
         "http:request",
+        "wsc:consume",
         "db:select",
         "db:insert",
         "db:update",
@@ -62,6 +63,103 @@ class XMLAnalyzer:
         "apikit:console",
     )
 
+    # Well-known MuleSoft / Spring namespace URIs used to synthesise missing
+    # xmlns declarations when a project XML omits them.
+    _KNOWN_NS_URIS: Dict[str, str] = {
+        'doc':          'http://www.mulesoft.org/schema/mule/documentation',
+        'http':         'http://www.mulesoft.org/schema/mule/http',
+        'db':           'http://www.mulesoft.org/schema/mule/db',
+        'ee':           'http://www.mulesoft.org/schema/mule/ee/core',
+        'dw':           'http://www.mulesoft.org/schema/mule/ee/dw',
+        'apikit':       'http://www.mulesoft.org/schema/mule/apikit',
+        'batch':        'http://www.mulesoft.org/schema/mule/batch',
+        'sftp':         'http://www.mulesoft.org/schema/mule/sftp',
+        'file':         'http://www.mulesoft.org/schema/mule/file',
+        'ftp':          'http://www.mulesoft.org/schema/mule/ftp',
+        'jms':          'http://www.mulesoft.org/schema/mule/jms',
+        'vm':           'http://www.mulesoft.org/schema/mule/vm',
+        'amqp':         'http://www.mulesoft.org/schema/mule/amqp',
+        'salesforce':   'http://www.mulesoft.org/schema/mule/salesforce',
+        'objectstore':  'http://www.mulesoft.org/schema/mule/objectstore',
+        'kafka':        'http://www.mulesoft.org/schema/mule/kafka',
+        'anypoint-mq':  'http://www.mulesoft.org/schema/mule/anypoint-mq',
+        'email':        'http://www.mulesoft.org/schema/mule/email',
+        'wsc':          'http://www.mulesoft.org/schema/mule/wsc',
+        'tls':          'http://www.mulesoft.org/schema/mule/tls',
+        'oauth':        'http://www.mulesoft.org/schema/mule/oauth',
+        'xsi':          'http://www.w3.org/2001/XMLSchema-instance',
+        'spring':       'http://www.springframework.org/schema/beans',
+        'munit':        'http://www.mulesoft.org/schema/mule/munit',
+        'munit-tools':  'http://www.mulesoft.org/schema/mule/munit-tools',
+        'aggregators':  'http://www.mulesoft.org/schema/mule/aggregators',
+        'sockets':      'http://www.mulesoft.org/schema/mule/sockets',
+        'validation':   'http://www.mulesoft.org/schema/mule/validation',
+        'crypto':       'http://www.mulesoft.org/schema/mule/crypto',
+        'compression':  'http://www.mulesoft.org/schema/mule/compression',
+    }
+
+    @staticmethod
+    def _sanitize_xml_string(content: str) -> str:
+        """
+        Prepare a raw XML string so ET.fromstring can parse it reliably.
+
+        Three transforms are applied:
+
+        1. BOM removal — strips UTF-8/UTF-16 byte-order marks (\\ufeff) that
+           Python carries after decoding and that cause 'not well-formed
+           (invalid token): line 1, column 0'.
+
+        2. Illegal control-character removal — XML 1.0 forbids all C0 controls
+           except TAB (\\x09), LF (\\x0a), CR (\\x0d), plus DEL (\\x7f) and C1
+           (\\x80-\\x9f).  These appear in Windows-saved files and cause the
+           same 'not well-formed' error.
+
+        3. Missing namespace-prefix injection — MuleSoft projects routinely use
+           doc:name="…" (and sometimes ee:, apikit:, etc.) without declaring
+           xmlns:doc on the root element.  ET.fromstring is strict about
+           undeclared prefixes and raises 'unbound prefix'.  This step detects
+           every prefix used in the document, compares it against the declared
+           xmlns:* attributes, and injects synthetic declarations into the root
+           <mule> tag for any that are missing.
+        """
+        # 1. Strip BOM
+        content = content.lstrip('\ufeff')
+
+        # 2. Remove XML-illegal control characters
+        content = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]', '', content)
+
+        # 3. Inject missing namespace declarations
+        # Collect every prefix used in element tag names: <prefix:local or </prefix:local
+        tag_prefixes = set(re.findall(r'</?([a-zA-Z][a-zA-Z0-9_.-]*):[a-zA-Z]', content))
+        # Collect every prefix used in attribute names: prefix:attrname="..."
+        attr_prefixes = set(re.findall(
+            r'\b([a-zA-Z][a-zA-Z0-9_.-]*):[a-zA-Z][a-zA-Z0-9_.-]*\s*=', content
+        ))
+        # 'xml' and 'xmlns' are reserved and must never be redeclared
+        used = (tag_prefixes | attr_prefixes) - {'xml', 'xmlns'}
+        declared = set(re.findall(r'xmlns:([a-zA-Z][a-zA-Z0-9_.-]*)\s*=', content))
+        missing = used - declared
+
+        if missing:
+            injections = ' '.join(
+                'xmlns:{p}="{uri}"'.format(
+                    p=p,
+                    uri=XMLAnalyzer._KNOWN_NS_URIS.get(
+                        p, f'http://www.mulesoft.org/schema/mule/{p}'
+                    )
+                )
+                for p in sorted(missing)
+            )
+            # Insert the new declarations before the closing '>' of the root opening tag
+            content = re.sub(
+                r'(<mule\b[^>]*?)(\s*/?>)',
+                rf'\1 {injections}\2',
+                content,
+                count=1,
+            )
+
+        return content
+
     def __init__(self):
         """Initialize XML analyzer."""
         self.console = Console()
@@ -69,16 +167,21 @@ class XMLAnalyzer:
     def analyze_mule_xml(self, xml_content: str) -> Dict:
         """
         Analyze Mule XML content and extract key information.
-        
+
         Args:
             xml_content: Raw XML content string
-            
+
         Returns:
             Dictionary containing extracted information
-            
+
         Raises:
             Exception: If XML cannot be parsed or is not a valid Mule app
         """
+        # Sanitize before parsing: strips BOM, illegal control chars, and
+        # injects any missing xmlns declarations (e.g. xmlns:doc) that
+        # ET.fromstring requires but Anypoint Studio sometimes omits.
+        xml_content = self._sanitize_xml_string(xml_content)
+
         try:
             # Parse XML with additional error handling
             try:
@@ -170,18 +273,25 @@ class XMLAnalyzer:
             raise Exception("No valid Mule XML documents found in input")
 
         analyses = []
+        parse_errors: List[str] = []
         for document in documents:
             try:
                 analysis = self.analyze_mule_xml(document["content"])
                 analysis["source_file"] = document["name"]
                 analyses.append(analysis)
             except Exception as exc:
+                msg = f"{document['name']}: {str(exc)}"
+                parse_errors.append(msg)
                 self.console.print(
-                    f"[yellow]Skipping unreadable XML source {document['name']}: {str(exc)}[/yellow]"
+                    f"[yellow]Skipping unreadable XML source {msg}[/yellow]"
                 )
 
         if not analyses:
-            raise Exception("Unable to analyze any Mule XML documents from the provided project")
+            detail = "; ".join(parse_errors) if parse_errors else "unknown reason"
+            raise Exception(
+                f"Unable to analyze any Mule XML documents from the provided project. "
+                f"Parse failures — {detail}"
+            )
 
         return self._merge_project_analyses(analyses)
 
@@ -218,7 +328,7 @@ class XMLAnalyzer:
         ]
 
         for listener_tag, job_type in listener_checks:
-            if self._find_element_by_tag(root, listener_tag, namespaces):
+            if self._find_element_by_tag(root, listener_tag, namespaces) is not None:
                 return job_type
         
         return "Generic Mule Flow"
@@ -279,8 +389,13 @@ class XMLAnalyzer:
                     if ref_name:
                         referenced_flows.append(ref_name)
 
-                if ":" in child.tag:
-                    connectors.add(child.tag.split("}", 1)[-1] if "}" in child.tag else child.tag)
+                processor_type = self._qualify_processor_type(child, child_name)
+                if (
+                    processor_type in self.EXTERNAL_MOCK_PROCESSORS
+                    or processor_type in self.VOID_VERIFY_PROCESSORS
+                    or processor_type in self.SOURCE_PROCESSORS
+                ):
+                    connectors.add(processor_type)
                 elif child_name in {
                     "choice", "foreach", "scatter-gather", "until-successful",
                     "parallel-foreach", "try", "async", "scheduler"
@@ -444,6 +559,7 @@ class XMLAnalyzer:
 
         namespace_map = {
             "http://www.mulesoft.org/schema/mule/http": "http",
+            "http://www.mulesoft.org/schema/mule/wsc": "wsc",
             "http://www.mulesoft.org/schema/mule/ee/core": "ee",
             "http://www.mulesoft.org/schema/mule/db": "db",
             "http://www.mulesoft.org/schema/mule/salesforce": "salesforce",
@@ -593,7 +709,7 @@ class XMLAnalyzer:
         """Extract payload/vars/attributes references from DWL to guide mocks/assertions."""
         if not text:
             return []
-        matches = re.findall(r"\b(?:payload|vars|attributes)\.[A-Za-z0-9_.\[\]]+", text)
+        matches = re.findall(r"\b(?:payload|vars|attributes)\.[A-Za-z0-9_.\[\]'\"]+", text)
         ordered = []
         for match in matches:
             if match not in ordered:
@@ -686,19 +802,19 @@ class XMLAnalyzer:
         return None
 
     def _extract_xml_documents(self, xml_content: str) -> List[Dict[str, str]]:
-        """Extract XML documents from a combined project payload."""
+        """Extract and sanitize XML documents from a combined project payload."""
         header_pattern = r"\n?--- Content from (?P<name>.+?) ---\n"
         matches = list(re.finditer(header_pattern, xml_content))
 
         if not matches:
-            cleaned_content = xml_content.strip()
+            cleaned_content = self._sanitize_xml_string(xml_content.strip())
             return [{"name": "input.xml", "content": cleaned_content}] if cleaned_content else []
 
         documents = []
         for index, match in enumerate(matches):
             start = match.end()
             end = matches[index + 1].start() if index + 1 < len(matches) else len(xml_content)
-            content = xml_content[start:end].strip()
+            content = self._sanitize_xml_string(xml_content[start:end].strip())
             if content:
                 documents.append({
                     "name": match.group("name").strip(),

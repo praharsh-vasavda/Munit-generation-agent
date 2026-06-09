@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'munit-generation-agent-secret-key'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # Mule project ZIPs are often larger than 16MB
 
 # Global variables for job tracking
 active_jobs = {}
@@ -165,7 +165,11 @@ class WebMUnitGenerator:
             # Step 4: Parse business use case
             active_jobs[job_id].update({'progress': 40, 'message': 'Parsing business use case...'})
             scenarios = self.doc_parser.parse_document(usecase_content, flow_summary["job_type"])
-            scenario_map = self.doc_parser.map_scenarios_to_flows(scenarios["scenarios"], flow_summary)
+            scenario_map = (
+                self.doc_parser.map_scenarios_to_flows(scenarios["scenarios"], flow_summary)
+                if usecase_content and usecase_content.strip()
+                else {}
+            )
             
             # Step 5-7: Build targeted prompts, generate, and write per-flow MUnits
             active_jobs[job_id].update({'progress': 50, 'message': 'Generating per-flow MUnit suites...'})
@@ -247,7 +251,10 @@ class WebMUnitGenerator:
     
     def _fetch_usecase_content(self, params: dict) -> str:
         """Fetch use case content based on source type (optional)."""
-        usecase_source = params.get('usecase_source')
+        usecase_source = (params.get('usecase_source') or '').strip().lower()
+        confluence_url = (params.get('confluence_url') or '').strip()
+        if not usecase_source and confluence_url:
+            usecase_source = 'confluence'
         
         # First check if content is already processed (from ZIP extraction)
         if 'usecase_file' in params and params['usecase_file']:
@@ -262,14 +269,19 @@ class WebMUnitGenerator:
             return ""  # No processed content found, use default scenarios
         
         elif usecase_source == 'confluence':
-            if not params.get('confluence_url'):
-                return ""  # No URL provided, use default scenarios
+            if not confluence_url:
+                raise Exception("Confluence use case source selected, but no Confluence URL was provided.")
+            if not params.get('confluence_token') or not params.get('confluence_email'):
+                raise Exception("Confluence URL was provided, but Confluence email/token is missing.")
             confluence_reader = ConfluenceReader(
-                url=params['confluence_url'].split("/wiki")[0] + "/wiki",
+                url=confluence_url.split("/wiki")[0] + "/wiki",
                 token=params['confluence_token'],
                 email=params['confluence_email']
             )
-            return confluence_reader.fetch_page_content(params['confluence_url'])
+            content = confluence_reader.fetch_page_content(confluence_url)
+            if not content or not content.strip():
+                raise Exception("Confluence page was fetched, but no business use case content was found.")
+            return content
         
         else:
             return ""  # Invalid source, use default scenarios
@@ -318,10 +330,10 @@ class WebMUnitGenerator:
             # Step 2: Validate use case content (optional)
             active_jobs[job_id].update({'progress': 20, 'message': 'Validating documentation...'})
             
-            usecase_content = ""
-            if 'usecase_file' in params and params['usecase_file']:
-                usecase_content = params['usecase_file']
-                print(f"DEBUG: Using pre-processed use case content (length: {len(usecase_content)})")
+            usecase_content = self._fetch_usecase_content(params)
+            if usecase_content:
+                print(f"DEBUG: Documentation available for enhanced generation (length: {len(usecase_content)})")
+                params['usecase_file'] = usecase_content
             
             # Step 3: Generate with enhanced features
             active_jobs[job_id].update({'progress': 30, 'message': 'Running enhanced generation...'})
@@ -368,17 +380,20 @@ class WebMUnitGenerator:
             # Step 3: Get business use case content
             active_jobs[job_id].update({'progress': 30, 'message': 'Processing documentation...'})
             
-            usecase_content = ""
-            if 'usecase_file' in params and params['usecase_file']:
-                usecase_content = params['usecase_file']
-                print(f"DEBUG: Using pre-processed use case content (length: {len(usecase_content)})")
+            usecase_content = self._fetch_usecase_content(params)
+            if usecase_content:
+                print(f"DEBUG: Using business use case content (length: {len(usecase_content)})")
             else:
                 print(f"DEBUG: No documentation provided, using default scenarios")
             
             # Step 4: Parse business use case
             active_jobs[job_id].update({'progress': 40, 'message': 'Parsing business use case...'})
             scenarios = self.doc_parser.parse_document(usecase_content, flow_summary["job_type"])
-            scenario_map = self.doc_parser.map_scenarios_to_flows(scenarios["scenarios"], flow_summary)
+            scenario_map = (
+                self.doc_parser.map_scenarios_to_flows(scenarios["scenarios"], flow_summary)
+                if usecase_content and usecase_content.strip()
+                else {}
+            )
             
             # Step 5-7: Build targeted prompts, generate, and write per-flow MUnits
             active_jobs[job_id].update({'progress': 50, 'message': 'Generating per-flow MUnit suites...'})
@@ -472,13 +487,97 @@ class WebMUnitGenerator:
             content = file_reader.read_uploaded_file(file, max_size_mb=10)
             
             # Clean content if it's XML
-            if file.filename.lower().endswith('.xml'):
+            if file.filename.lower().endswith(('.xml', '.mule')):
                 content = file_reader.clean_xml_content(content)
             
             return content
                 
         except Exception as e:
             return f"[Error reading file {file.filename}: {str(e)}]"
+
+    def _read_uploaded_usecase_file(self, file) -> str:
+        """Read uploaded business use-case files, including PDF/DOCX and archives."""
+        if not file or not hasattr(file, 'filename') or not file.filename:
+            return ""
+
+        filename = file.filename
+        lower_name = filename.lower()
+
+        try:
+            if lower_name.endswith(('.zip', '.jar')):
+                return self._read_usecase_archive(file)
+            if lower_name.endswith(('.txt', '.md', '.markdown', '.json', '.yaml', '.yml', '.csv')):
+                return self._read_file_content(file)
+            if lower_name.endswith(('.pdf', '.docx', '.doc')):
+                return self._read_uploaded_document_via_tempfile(file)
+            return self._read_file_content(file)
+        except Exception as exc:
+            return f"[Error reading use case file {filename}: {str(exc)}]"
+
+    def _read_uploaded_document_via_tempfile(self, file) -> str:
+        """Persist an uploaded document briefly so LocalReader can parse it."""
+        suffix = Path(file.filename).suffix or ".txt"
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+                file.seek(0)
+                temp_file.write(file.read())
+                temp_path = temp_file.name
+            return LocalReader().read_document(temp_path)
+        finally:
+            try:
+                file.seek(0)
+            except Exception:
+                pass
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+    def _read_usecase_archive(self, file) -> str:
+        """Read supported business-use-case documents from an uploaded ZIP/JAR."""
+        import zipfile
+        import shutil
+
+        temp_dir = tempfile.mkdtemp(prefix='usecase_docs_')
+        archive_path = os.path.join(temp_dir, 'usecase.zip')
+        supported_suffixes = {'.txt', '.md', '.markdown', '.json', '.yaml', '.yml', '.csv', '.pdf', '.docx', '.doc'}
+        parts = []
+
+        try:
+            file.seek(0)
+            file.save(archive_path)
+            with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+
+            for root, dirs, files in os.walk(temp_dir):
+                dirs[:] = [d for d in dirs if d.lower() not in {'__macosx', '.git', '__pycache__'}]
+                for file_name in sorted(files):
+                    if file_name == 'usecase.zip' or file_name.startswith('._'):
+                        continue
+                    path = Path(root) / file_name
+                    suffix = path.suffix.lower()
+                    if suffix not in supported_suffixes:
+                        continue
+                    try:
+                        if suffix in {'.pdf', '.docx', '.doc'}:
+                            content = LocalReader().read_document(str(path))
+                        else:
+                            content = path.read_text(encoding='utf-8', errors='replace')
+                    except Exception as exc:
+                        content = f"[Error reading archived use case file {file_name}: {str(exc)}]"
+                    if content.strip():
+                        rel_name = os.path.relpath(path, temp_dir).replace("\\", "/")
+                        parts.append(f"\n\n--- Content from {rel_name} ---\n{content}\n")
+        finally:
+            try:
+                file.seek(0)
+            except Exception:
+                pass
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return "".join(parts)
 
     def _resolve_generation_mode(
         self,
@@ -525,6 +624,14 @@ class WebMUnitGenerator:
         sample_payloads = sample_payloads or {}
         connector_samples = connector_samples or {}
         resolved_mode = self._resolve_generation_mode(generation_mode, sample_payloads)
+        business_context_applied = bool(
+            document_context and (
+                document_context.get("raw_content_length", 0) > 0
+                or any(item.get("source") != "default" for item in document_context.get("scenarios", []) or [])
+                or document_context.get("business_rules")
+                or document_context.get("inputs_outputs")
+            )
+        )
 
         # Reset token tracking for this generation session
         self.token_budget.reset()
@@ -570,6 +677,8 @@ class WebMUnitGenerator:
                     "scenario_plan": build_metadata.get("scenario_plan", []),
                     "preflight_validation": build_metadata.get("preflight_validation", {}),
                     "target_munit_version": build_metadata.get("target_munit_version"),
+                    "business_context_applied": business_context_applied,
+                    "business_context_length": (document_context or {}).get("raw_content_length", 0),
                     "generation_time": 0.0,
                     "failures": validation.get("errors", []),
                 }
@@ -617,6 +726,8 @@ class WebMUnitGenerator:
                     "estimated_tokens": estimated_tokens,
                     "semantic_validation": validation,
                     "template_based": llm_metadata.get("template_based", False),
+                    "business_context_applied": business_context_applied,
+                    "business_context_length": (document_context or {}).get("raw_content_length", 0),
                 }
                 output_file = self.munit_writer.write_munit_file(munit_xml, target_flow, metadata)
                 extra_files = metadata.get("mock_asset_files", []) or []
@@ -701,54 +812,136 @@ class WebMUnitGenerator:
         dwl_files = {}
         src_main_dir = None
         pom_path = None
+        scan_details = {
+            "scan_root": "",
+            "scan_roots": [],
+            "used_src_main": False,
+            "xml_candidates": [],
+            "mule_files": [],
+            "skipped_xml": [],
+            "nested_archives": [],
+        }
 
+        self._extract_nested_archives(temp_dir, scan_details)
+
+        # Walk to find src/main, but skip junk folders injected by macOS Finder
+        # (__MACOSX) or other tools so they never shadow the real project root.
+        _JUNK_ROOTS = {'__macosx', '.ds_store', '__pycache__', '.git', 'node_modules'}
+
+        # Collect ALL valid src/main candidates first, then pick the best one.
+        candidates = []  # list of (src_main_path, pom_path_or_None)
         for root, dirs, files in os.walk(temp_dir):
+            # Prune junk dirs in-place so os.walk never descends into them
+            dirs[:] = sorted(d for d in dirs if d.lower() not in _JUNK_ROOTS)
             if 'src' in dirs and os.path.exists(os.path.join(root, 'src', 'main')):
-                src_main_dir = os.path.join(root, 'src', 'main')
-                if 'pom.xml' in files and pom_path is None:
-                    pom_path = os.path.join(root, 'pom.xml')
-                break
-            if 'pom.xml' in files and pom_path is None:
-                pom_path = os.path.join(root, 'pom.xml')
+                candidate = os.path.join(root, 'src', 'main')
+                pom = os.path.join(root, 'pom.xml')
+                candidates.append((candidate, pom if os.path.isfile(pom) else None))
 
-        if not src_main_dir or not os.path.exists(src_main_dir):
-            raise Exception("Invalid Mule project structure: src/main folder not found in ZIP archive")
+        scan_roots = []
+        if candidates:
+            src_main_dir, pom_path = candidates[0]
+            if len(candidates) > 1:
+                logger.info("Multiple src/main candidates found; scanning all %s candidates", len(candidates))
+            for candidate, candidate_pom in candidates:
+                if candidate not in scan_roots:
+                    scan_roots.append(candidate)
+                if pom_path is None and candidate_pom:
+                    pom_path = candidate_pom
+        else:
+            logger.info(
+                "src/main folder not found in ZIP archive; scanning extracted archive for Mule XML files"
+            )
 
-        logger.info(f"Scanning Mule project from {src_main_dir}")
+        if temp_dir not in scan_roots:
+            scan_roots.append(temp_dir)
+
+        scan_details["scan_root"] = os.path.relpath(scan_roots[0], temp_dir).replace("\\", "/")
+        scan_details["scan_roots"] = [
+            os.path.relpath(root, temp_dir).replace("\\", "/") for root in scan_roots
+        ]
+        scan_details["used_src_main"] = bool(candidates)
+        if candidates:
+            logger.info("Scanning Mule project roots: %s", ", ".join(scan_details["scan_roots"]))
 
         skip_xml_names = {'pom.xml', 'log4j2.xml', 'log4j.xml', 'application-types.xml'}
-        skip_path_markers = ('/munit/', '/target/', '/.mule/')
+        skip_path_markers = (
+            '/munit/', '/target/', '/.mule/', '/__macosx/',
+            '/src/test/', '/test/munit/',
+        )
 
-        for root, dirs, files in os.walk(src_main_dir):
-            for file_name in files:
-                full_path = os.path.join(root, file_name)
-                normalized_path = full_path.replace("\\", "/").lower()
-
-                if any(marker in normalized_path for marker in skip_path_markers):
-                    continue
-
-                if file_name.lower().endswith('.xml'):
-                    if file_name.lower() in skip_xml_names:
+        seen_files = set()
+        for scan_root in scan_roots:
+            for root, dirs, files in os.walk(scan_root):
+                dirs[:] = sorted(d for d in dirs if d.lower() not in _JUNK_ROOTS)
+                for file_name in files:
+                    full_path = os.path.abspath(os.path.join(root, file_name))
+                    if full_path in seen_files:
                         continue
-                    mule_files.append(full_path)
-                elif include_dwl and file_name.lower().endswith('.dwl'):
-                    relative_path = os.path.relpath(full_path, src_main_dir).replace("\\", "/")
-                    try:
-                        dwl_files[relative_path] = Path(full_path).read_text(encoding='utf-8')
-                    except UnicodeDecodeError:
-                        dwl_files[relative_path] = Path(full_path).read_text(encoding='utf-8', errors='replace')
+                    seen_files.add(full_path)
+                    normalized_path = full_path.replace("\\", "/").lower()
+                    relative_to_scan_root = os.path.relpath(full_path, scan_root).replace("\\", "/")
+                    relative_to_archive = os.path.relpath(full_path, temp_dir).replace("\\", "/")
+                    normalized_relative = f"/{relative_to_archive.lower()}"
+
+                    if (
+                        any(marker in normalized_path for marker in skip_path_markers)
+                        or any(marker in normalized_relative for marker in skip_path_markers)
+                    ):
+                        continue
+
+                    lower_name = file_name.lower()
+                    if lower_name.endswith(('.xml', '.mule')):
+                        scan_details["xml_candidates"].append(relative_to_archive)
+                        if lower_name in skip_xml_names:
+                            scan_details["skipped_xml"].append({
+                                "path": relative_to_archive,
+                                "reason": "ignored infrastructure XML",
+                            })
+                            continue
+                        looks_like_mule, reason = self._classify_mule_xml_file(full_path)
+                        if not looks_like_mule:
+                            scan_details["skipped_xml"].append({
+                                "path": relative_to_archive,
+                                "reason": reason,
+                            })
+                            continue
+                        mule_files.append(full_path)
+                        scan_details["mule_files"].append(relative_to_archive)
+                    elif include_dwl and lower_name.endswith('.dwl'):
+                        relative_path = relative_to_archive
+                        try:
+                            dwl_files[relative_path] = Path(full_path).read_text(encoding='utf-8')
+                        except UnicodeDecodeError:
+                            dwl_files[relative_path] = Path(full_path).read_text(encoding='utf-8', errors='replace')
 
         if not mule_files:
-            raise Exception("No Mule XML files found in ZIP archive")
+            raise Exception(
+                "No Mule XML files found in ZIP archive. Upload a Mule project ZIP or XML files containing a <mule> root."
+            )
 
         combined_content = ""
         for xml_file_path in sorted(mule_files):
+            # Read bytes first so we can handle any encoding correctly, then
+            # sanitize (BOM, control chars, missing xmlns declarations) before
+            # adding to the combined payload that analyze_mule_project will parse.
             try:
-                content = Path(xml_file_path).read_text(encoding='utf-8')
-            except UnicodeDecodeError:
-                content = Path(xml_file_path).read_text(encoding='utf-8', errors='replace')
+                raw = Path(xml_file_path).read_bytes()
+            except Exception as read_err:
+                logger.warning("Could not read %s: %s — skipping", xml_file_path, read_err)
+                continue
 
-            relative_name = os.path.relpath(xml_file_path, src_main_dir).replace("\\", "/")
+            for enc in ('utf-8-sig', 'utf-8', 'latin-1'):
+                try:
+                    content = raw.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                content = raw.decode('utf-8', errors='replace')
+
+            content = XMLAnalyzer._sanitize_xml_string(content)
+            relative_name = os.path.relpath(xml_file_path, temp_dir).replace("\\", "/")
             combined_content += f"\n\n--- Content from {relative_name} ---\n{content}\n"
 
         build_validation = self._inspect_project_build(pom_path)
@@ -758,8 +951,76 @@ class WebMUnitGenerator:
             "dwl_files": dwl_files,
             "xml_count": len(mule_files),
             "dwl_count": len(dwl_files),
-            "build_validation": build_validation
+            "build_validation": build_validation,
+            "scan_details": scan_details,
         }
+
+    def _looks_like_mule_xml_file(self, file_path: str) -> bool:
+        """Return True when an XML file appears to be a Mule configuration file."""
+        return self._classify_mule_xml_file(file_path)[0]
+
+    def _classify_mule_xml_file(self, file_path: str) -> tuple:
+        """Return (is_mule_config, reason) for an XML file."""
+        try:
+            raw = Path(file_path).read_bytes()
+        except Exception:
+            return False, "could not read file"
+
+        # Decode with best-effort fallback
+        for enc in ('utf-8-sig', 'utf-8', 'latin-1'):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            text = raw.decode('utf-8', errors='replace')
+
+        if "<mule" not in text:
+            return False, "does not contain a Mule root"
+
+        # Sanitize: strip BOM, illegal control chars, inject missing xmlns
+        # declarations (e.g. xmlns:doc) before attempting to parse.
+        sanitized = XMLAnalyzer._sanitize_xml_string(text.strip())
+        try:
+            root = ET.fromstring(sanitized)
+        except Exception as exc:
+            return False, f"XML parse error: {exc}"
+        local_name = root.tag.split("}", 1)[-1] if "}" in root.tag else root.tag
+        if local_name != "mule":
+            return False, f"root element is <{local_name}>, not <mule>"
+        return True, "mule config"
+
+    def _extract_nested_archives(self, temp_dir: str, scan_details: dict) -> None:
+        """Extract ZIPs nested inside the uploaded archive, common in exported code bundles."""
+        import zipfile
+
+        extracted_root = os.path.join(temp_dir, "_nested_archives")
+        archive_paths = []
+        for root, _dirs, files in os.walk(temp_dir):
+            if os.path.basename(root) == "_nested_archives":
+                continue
+            for file_name in files:
+                if root == temp_dir and file_name == "project.zip":
+                    continue
+                if file_name.lower().endswith((".zip", ".jar")):
+                    archive_paths.append(os.path.join(root, file_name))
+
+        for index, archive_path in enumerate(archive_paths[:5], start=1):
+            try:
+                target_dir = os.path.join(extracted_root, f"archive_{index}")
+                os.makedirs(target_dir, exist_ok=True)
+                with zipfile.ZipFile(archive_path, "r") as nested_zip:
+                    nested_zip.extractall(target_dir)
+                scan_details["nested_archives"].append({
+                    "path": os.path.relpath(archive_path, temp_dir).replace("\\", "/"),
+                    "extracted_to": os.path.relpath(target_dir, temp_dir).replace("\\", "/"),
+                })
+            except Exception as exc:
+                scan_details["nested_archives"].append({
+                    "path": os.path.relpath(archive_path, temp_dir).replace("\\", "/"),
+                    "error": str(exc),
+                })
 
     def _inspect_project_build(self, pom_path: Optional[str]) -> dict:
         """Check whether the project appears ready to run generated MUnit tests."""
@@ -1470,9 +1731,9 @@ def _extract_project_request_payload(params: dict, files: dict, include_dwl: boo
         xml_file_list = []
         for file in xml_files:
             if file and hasattr(file, 'filename') and file.filename:
-                if file.filename.lower().endswith(('.zip', '.rar', '.7z')):
+                if file.filename.lower().endswith(('.zip', '.jar', '.rar', '.7z')):
                     zip_files.append(file)
-                elif file.filename.lower().endswith('.xml'):
+                elif file.filename.lower().endswith(('.xml', '.mule')):
                     xml_file_list.append(file)
 
         if zip_files:
@@ -1486,6 +1747,7 @@ def _extract_project_request_payload(params: dict, files: dict, include_dwl: boo
             params['xml_file'] = project_files["combined_xml"]
             params['project_dwl_files'] = project_files["dwl_files"]
             params['build_validation'] = project_files.get("build_validation", {})
+            params['project_scan'] = project_files.get("scan_details", {})
             generator._set_project_context(project_files)
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1500,6 +1762,10 @@ def _extract_project_request_payload(params: dict, files: dict, include_dwl: boo
             params['xml_file'] = combined_content
             params['project_dwl_files'] = {}
             params['build_validation'] = {}
+            params['project_scan'] = {
+                "mule_files": [file.filename for file in xml_file_list],
+                "xml_candidates": [file.filename for file in xml_file_list],
+            }
             generator._set_project_context({"dwl_files": {}})
         else:
             raise Exception("No valid XML or ZIP files found in upload")
@@ -1507,7 +1773,7 @@ def _extract_project_request_payload(params: dict, files: dict, include_dwl: boo
         if not (xml_files and hasattr(xml_files, 'filename') and xml_files.filename):
             raise Exception("Invalid file upload")
         filename = xml_files.filename.lower()
-        if filename.endswith(('.zip', '.rar', '.7z')):
+        if filename.endswith(('.zip', '.jar', '.rar', '.7z')):
             import zipfile
             temp_dir = tempfile.mkdtemp(prefix='mule_project_')
             zip_path = os.path.join(temp_dir, 'project.zip')
@@ -1518,16 +1784,21 @@ def _extract_project_request_payload(params: dict, files: dict, include_dwl: boo
             params['xml_file'] = project_files["combined_xml"]
             params['project_dwl_files'] = project_files["dwl_files"]
             params['build_validation'] = project_files.get("build_validation", {})
+            params['project_scan'] = project_files.get("scan_details", {})
             generator._set_project_context(project_files)
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
-        elif filename.endswith('.xml'):
+        elif filename.endswith(('.xml', '.mule')):
             xml_content = generator._read_file_content(xml_files)
             if not xml_content.strip():
                 raise Exception(f"File {xml_files.filename} content doesn't appear to be valid XML")
             params['xml_file'] = xml_content
             params['project_dwl_files'] = {}
             params['build_validation'] = {}
+            params['project_scan'] = {
+                "mule_files": [xml_files.filename],
+                "xml_candidates": [xml_files.filename],
+            }
             generator._set_project_context({"dwl_files": {}})
         else:
             raise Exception(f"File {xml_files.filename} is not supported. Please upload .xml or .zip files.")
@@ -1538,11 +1809,11 @@ def _extract_project_request_payload(params: dict, files: dict, include_dwl: boo
             combined_content = ""
             for file in usecase_files:
                 if file and hasattr(file, 'filename') and file.filename:
-                    combined_content += f"\n\n--- Content from {file.filename} ---\n{generator._read_file_content(file)}\n"
+                    combined_content += f"\n\n--- Content from {file.filename} ---\n{generator._read_uploaded_usecase_file(file)}\n"
             params['usecase_file'] = combined_content
         else:
             if usecase_files and hasattr(usecase_files, 'filename') and usecase_files.filename:
-                params['usecase_file'] = generator._read_file_content(usecase_files)
+                params['usecase_file'] = generator._read_uploaded_usecase_file(usecase_files)
 
     return params
 
@@ -1625,9 +1896,9 @@ def generate_enhanced_munit():
             
             for file in xml_files:
                 if file and hasattr(file, 'filename') and file.filename:
-                    if file.filename.lower().endswith(('.zip', '.rar', '.7z')):
+                    if file.filename.lower().endswith(('.zip', '.jar', '.rar', '.7z')):
                         zip_files.append(file)
-                    elif file.filename.lower().endswith('.xml'):
+                    elif file.filename.lower().endswith(('.xml', '.mule')):
                         xml_file_list.append(file)
                     else:
                         print(f"WARNING: Skipping unsupported file: {file.filename}")
@@ -1721,7 +1992,7 @@ def generate_enhanced_munit():
                 if xml_files and hasattr(xml_files, 'filename') and xml_files.filename:
                     filename = xml_files.filename.lower()
                     
-                    if filename.endswith(('.zip', '.rar', '.7z')):
+                    if filename.endswith(('.zip', '.jar', '.rar', '.7z')):
                         # Handle ZIP file
                         print(f"DEBUG: enhanced endpoint - Processing ZIP file: {xml_files.filename}")
                         try:
@@ -1760,7 +2031,7 @@ def generate_enhanced_munit():
                         except Exception as e:
                             raise Exception(f"Error processing ZIP file: {str(e)}")
                     
-                    elif filename.endswith('.xml'):
+                    elif filename.endswith(('.xml', '.mule')):
                         # Handle XML file - directly pass to LLM without strict validation
                         print(f"DEBUG: enhanced endpoint - Processing single XML file")
                         
@@ -1793,12 +2064,12 @@ def generate_enhanced_munit():
                 combined_content = ""
                 for file in usecase_files:
                     if file and hasattr(file, 'filename') and file.filename:
-                        content = generator._read_file_content(file)
+                        content = generator._read_uploaded_usecase_file(file)
                         combined_content += f"\n\n--- Content from {file.filename} ---\n{content}\n"
                 params['usecase_file'] = combined_content
             else:
                 if usecase_files and hasattr(usecase_files, 'filename') and usecase_files.filename:
-                    content = generator._read_file_content(usecase_files)
+                    content = generator._read_uploaded_usecase_file(usecase_files)
                     params['usecase_file'] = content
         
         # Generate unique job ID
@@ -1849,7 +2120,8 @@ def analyze_enhanced_flows():
                 'recommended_count': len(selection_payload.get('recommended_flows', []))
             },
             'selection': selection_payload,
-            'build_validation': params.get('build_validation', {})
+            'build_validation': params.get('build_validation', {}),
+            'project_scan': params.get('project_scan', {})
         })
     except Exception as e:
         return jsonify({
@@ -1906,9 +2178,9 @@ def generate_munit():
                 
                 for file in xml_files:
                     if file and hasattr(file, 'filename') and file.filename:
-                        if file.filename.lower().endswith(('.zip', '.rar', '.7z')):
+                        if file.filename.lower().endswith(('.zip', '.jar', '.rar', '.7z')):
                             zip_files.append(file)
-                        elif file.filename.lower().endswith('.xml'):
+                        elif file.filename.lower().endswith(('.xml', '.mule')):
                             xml_file_list.append(file)
                         else:
                             print(f"WARNING: Skipping unsupported file: {file.filename}")
@@ -1992,7 +2264,7 @@ def generate_munit():
                 if xml_files and hasattr(xml_files, 'filename') and xml_files.filename:
                     filename = xml_files.filename.lower()
                     
-                    if filename.endswith(('.zip', '.rar', '.7z')):
+                    if filename.endswith(('.zip', '.jar', '.rar', '.7z')):
                         # Handle ZIP file
                         print(f"DEBUG: Processing ZIP file: {xml_files.filename}")
                         try:
@@ -2031,7 +2303,7 @@ def generate_munit():
                         except Exception as e:
                             raise Exception(f"Error processing ZIP file: {str(e)}")
                     
-                    elif filename.endswith('.xml'):
+                    elif filename.endswith(('.xml', '.mule')):
                         # Handle XML file
                         print(f"DEBUG: Processing single XML file")
                         print(f"DEBUG: File {xml_files.filename} size: {xml_files.content_length if hasattr(xml_files, 'content_length') else 'Unknown'}")
@@ -2071,13 +2343,13 @@ def generate_munit():
                 combined_content = ""
                 for file in usecase_files:
                     if file and hasattr(file, 'filename') and file.filename:
-                        content = generator._read_file_content(file)
+                        content = generator._read_uploaded_usecase_file(file)
                         combined_content += f"\n\n--- Content from {file.filename} ---\n{content}\n"
                 params['usecase_file'] = combined_content
             else:
                 # Single file
                 if usecase_files and hasattr(usecase_files, 'filename') and usecase_files.filename:
-                    usecase_content = generator._read_file_content(usecase_files)
+                    usecase_content = generator._read_uploaded_usecase_file(usecase_files)
                     params['usecase_file'] = usecase_content
         
         # Start generation in background thread

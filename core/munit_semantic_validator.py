@@ -79,7 +79,7 @@ class MUnitSemanticValidator:
 
         set_event = flow_context.get("set_event_plan") or {}
         if set_event.get("attributes_template", {}).get("queryParams"):
-            if "queryParams" not in suite_xml and "queryParams" not in suite_xml:
+            if "queryParams" not in suite_xml and "set-event_attributes_" not in suite_xml:
                 result["warnings"].append(
                     "Flow reads attributes.queryParams but generated set-event may not include queryParams."
                 )
