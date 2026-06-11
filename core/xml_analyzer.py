@@ -1116,16 +1116,20 @@ class XMLAnalyzer:
                     if ref not in inherited_payload_refs:
                         inherited_payload_refs.append(ref)
 
+            execution_flows = [target] + descendants
+            expanded_processor_chain = self._expanded_processor_chain(execution_flows, flow_graph)
+            effective_final_processor = self._effective_final_processor(execution_flows, flow_graph)
+
             from .deterministic_munit_builder import build_set_event_plan, extract_output_fields
 
             set_event_plan = build_set_event_plan(
-                node.get("processor_chain", []),
+                expanded_processor_chain,
                 inline_dwl[:8],
                 node.get("trigger", {}) or {},
             )
             output_fields = extract_output_fields(
                 inline_dwl[:8],
-                node.get("final_processor", {}) or {},
+                effective_final_processor,
             )
 
             contexts[target] = {
@@ -1135,6 +1139,7 @@ class XMLAnalyzer:
                 "parent_flows": node.get("parents", []),
                 "child_flows": node.get("children", []),
                 "related_flows": related_flows,
+                "execution_flows": execution_flows,
                 "connectors": sorted(inherited_connectors),
                 "error_handlers": sorted(inherited_error_handlers),
                 "error_handler_details": inherited_error_handler_details[:8],
@@ -1142,9 +1147,11 @@ class XMLAnalyzer:
                 "variable_writes": inherited_variable_writes[:16],
                 "http_requests": node.get("http_requests", []),
                 "processors": node.get("processors", []),
-                "processor_chain": node.get("processor_chain", []),
+                "processor_chain": expanded_processor_chain,
+                "own_processor_chain": node.get("processor_chain", []),
                 "trigger": node.get("trigger", {}),
-                "final_processor": node.get("final_processor", {}),
+                "final_processor": effective_final_processor,
+                "own_final_processor": node.get("final_processor", {}),
                 "dwl_files": sorted(inherited_dwl_files),
                 "inline_dwl": inline_dwl[:8],
                 "payload_references": inherited_payload_refs[:30],
@@ -1156,6 +1163,26 @@ class XMLAnalyzer:
             }
 
         return contexts
+
+    def _expanded_processor_chain(self, flow_names: List[str], flow_graph: Dict[str, Dict]) -> List[Dict]:
+        """Return the ordered processor chain for the target plus reachable child flows."""
+        expanded = []
+        for flow_name in flow_names:
+            for processor in flow_graph.get(flow_name, {}).get("processor_chain", []) or []:
+                item = dict(processor)
+                item.setdefault("flow", flow_name)
+                expanded.append(item)
+        return expanded
+
+    def _effective_final_processor(self, flow_names: List[str], flow_graph: Dict[str, Dict]) -> Dict:
+        """Use the deepest reachable flow's final processor for end-to-end assertions."""
+        for flow_name in reversed(flow_names):
+            final_processor = flow_graph.get(flow_name, {}).get("final_processor", {}) or {}
+            if final_processor:
+                item = dict(final_processor)
+                item.setdefault("flow", flow_name)
+                return item
+        return {}
 
     def _collect_descendant_flows(self, flow_name: str, flow_graph: Dict[str, Dict]) -> List[str]:
         """Return child flow refs recursively in traversal order."""

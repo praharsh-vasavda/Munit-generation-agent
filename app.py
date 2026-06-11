@@ -1475,6 +1475,8 @@ class WebMUnitGenerator:
                 "error_handlers": context.get("error_handlers", []),
                 "child_flows": context.get("child_flows", []),
                 "parent_flows": context.get("parent_flows", []),
+                "related_flows": context.get("related_flows", []),
+                "execution_flows": context.get("execution_flows", []),
                 "recommended": is_recommended,
                 "selection_reason": self._describe_flow_selection_reason(context, is_recommended)
             })

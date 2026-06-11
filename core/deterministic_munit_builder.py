@@ -70,6 +70,7 @@ class DeterministicMUnitBuilder:
 
         resource_files: Dict[str, str] = {}
         tests_xml: List[str] = []
+        used_test_names: set = set()
 
         for index, scenario in enumerate(scenario_list, start=1):
             test_xml, files = self._build_test(
@@ -77,6 +78,7 @@ class DeterministicMUnitBuilder:
                 scenario,
                 resource_folder,
                 index,
+                used_test_names=used_test_names,
                 sample_payload=sample_payload if scenario.get("type") == "happy_path" else None,
                 connector_samples=connector_samples or {},
                 recorder_style=(generation_mode == "recorder"),
@@ -270,13 +272,17 @@ class DeterministicMUnitBuilder:
         resource_folder: str,
         index: int,
         *,
+        used_test_names: Optional[set] = None,
         sample_payload: Optional[str],
         connector_samples: Dict[str, Dict[str, str]],
         recorder_style: bool,
     ) -> Tuple[str, Dict[str, str]]:
         target_flow = flow_context.get("target_flow", "main-flow")
-        scenario_slug = self._slugify(scenario.get("type") or scenario.get("name") or f"scenario-{index}")
-        test_name = f"{self._slugify(target_flow)}-{scenario_slug}-test"
+        scenario_slug = self._slugify(scenario.get("name") or scenario.get("type") or f"scenario-{index}")
+        test_name = self._unique_test_name(
+            f"{self._slugify(target_flow)}-{scenario_slug}-test",
+            used_test_names,
+        )
         description = scenario.get("description", f"{scenario_slug} for {target_flow}")
 
         behavior_parts: List[str] = []
@@ -1530,6 +1536,18 @@ import {resource_folder}::{module_name}
         if flow_slug:
             return f"{flow_slug}-test-suite"
         return f"{self._slugify(target_flow)}-test-suite"
+
+    def _unique_test_name(self, base_name: str, used_names: Optional[set]) -> str:
+        """Return a suite-local unique munit:test name."""
+        if used_names is None:
+            return base_name
+        candidate = base_name
+        suffix = 2
+        while candidate in used_names:
+            candidate = f"{base_name}-{suffix}"
+            suffix += 1
+        used_names.add(candidate)
+        return candidate
 
     def _resource_folder_name(self, target_flow: str) -> str:
         clean = re.sub(r"[^a-zA-Z0-9]", "", target_flow or "flow")

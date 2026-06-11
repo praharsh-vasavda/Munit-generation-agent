@@ -389,6 +389,54 @@ def test_analyzer_mocks_web_service_consumer_external_api(tmp_path):
     assert 'whereValue="Call SOAP API"' in suite_xml
 
 
+def test_parent_flow_context_reaches_flow_ref_subflow(tmp_path):
+    mule_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation">
+  <flow name="parentFlow">
+    <http:listener doc:name="Listener" path="/parent"/>
+    <flow-ref doc:name="Call child" name="childSubFlow"/>
+  </flow>
+  <sub-flow name="childSubFlow">
+    <http:request doc:name="Child API" method="GET" path="/child"/>
+    <ee:transform doc:name="Child Response">
+      <ee:message>
+        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  childStatus: "ok",
+  childId: payload.id
+}]]></ee:set-payload>
+      </ee:message>
+    </ee:transform>
+  </sub-flow>
+</mule>"""
+    analyzer = XMLAnalyzer()
+    summary = analyzer.analyze_mule_project(mule_xml)
+    flow_context = summary["flow_contexts"]["parentFlow"]
+
+    assert summary["test_targets"] == ["parentFlow"]
+    assert flow_context["child_flows"] == ["childSubFlow"]
+    assert flow_context["execution_flows"] == ["parentFlow", "childSubFlow"]
+    assert any(
+        item.get("flow") == "childSubFlow" and item.get("type") == "http:request"
+        for item in flow_context["processor_chain"]
+    )
+    assert flow_context["mock_plan"][0]["doc_name"] == "Child API"
+    assert flow_context["final_processor"]["flow"] == "childSubFlow"
+    assert flow_context["output_fields"] == ["childStatus", "childId"]
+
+    builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
+    suite_xml, metadata = builder.build_suite(flow_context, generation_mode="recorder")
+
+    assert '<flow-ref doc:name="Execute parentFlow" name="parentFlow"/>' in suite_xml
+    assert '<munit-tools:mock-when doc:name="Mock Child API" processor="http:request">' in suite_xml
+    assert "mock_child-api_1_1.dwl" in metadata["resource_files"]
+
+
 def test_assertion_payload_is_array_when_final_transform_maps_payload(tmp_path):
     builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
     flow_context = {
@@ -741,6 +789,40 @@ def test_logger_only_error_handler_uses_expected_error_and_verify_call(tmp_path)
     assert "mock_call_backend_3_1.dwl" not in metadata["resource_files"]
     assert 'processor="logger"' in suite_xml
     assert 'whereValue="Log Backend Error"' in suite_xml
+
+
+def test_duplicate_scenario_types_get_unique_munit_test_names(tmp_path):
+    builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
+    flow_context = {
+        "target_flow": "duplicateFlow",
+        "set_event_plan": {
+            "payload_expression": '""',
+            "payload_media_type": "application/java",
+            "attributes_template": {"method": "GET", "requestPath": "/duplicate"},
+        },
+        "mock_plan": [
+            {
+                "action": "mock-when",
+                "processor": "http:request",
+                "doc_name": "Customer API",
+                "match_attribute": "doc:name",
+                "match_value": "Customer API",
+            },
+            {
+                "action": "mock-when",
+                "processor": "http:request",
+                "doc_name": "Order API",
+                "match_attribute": "doc:name",
+                "match_value": "Order API",
+            },
+        ],
+    }
+
+    suite_xml, _metadata = builder.build_suite(flow_context, generation_mode="recorder")
+
+    assert 'name="duplicateflow-customer-api-failure-test"' in suite_xml
+    assert 'name="duplicateflow-order-api-failure-test"' in suite_xml
+    assert suite_xml.count('name="duplicateflow-downstream-failure-test"') == 0
 
 
 def test_empty_downstream_array_scenario_returns_empty_array(tmp_path):
