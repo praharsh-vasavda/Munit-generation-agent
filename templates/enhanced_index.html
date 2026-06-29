@@ -1,1684 +1,1297 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MUnit Generation Agent</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
-    <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
-    <style>
-        .fade-in {
-            animation: fadeIn 0.5s ease-in;
-        }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        .progress-bar {
-            transition: width 0.3s ease;
-        }
-        .tab-content {
-            display: none;
-        }
-        .tab-content.active {
-            display: block;
-        }
-        .drop-zone {
-            transition: all 0.3s ease;
-        }
-        .drop-zone.dragover {
-            background-color: #dbeafe;
-            border-color: #3b82f6;
-            transform: scale(1.02);
-        }
-        .file-item {
-            transition: all 0.2s ease;
-        }
-        .file-item:hover {
-            transform: translateX(4px);
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .enhanced-feature {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        }
-        .feature-card {
-            transition: all 0.3s ease;
-        }
-        .feature-card:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MUnit Generator — PwC</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --pwc-orange:       #D04A02;
+    --pwc-orange-dark:  #B03F02;
+    --pwc-orange-light: #FAE8DF;
+    --pwc-orange-mid:   #F2A57A;
+    --pwc-black:        #2D2D2D;
+    --pwc-gray-dark:    #474747;
+    --pwc-gray:         #7D7D7D;
+    --pwc-gray-light:   #E8E8E8;
+    --pwc-gray-bg:      #F5F5F5;
+    --pwc-white:        #FFFFFF;
+    --pwc-success:      #008A00;
+    --pwc-error:        #C00000;
+    --pwc-warn:         #E07000;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+    background: var(--pwc-gray-bg);
+    color: var(--pwc-black);
+    min-height: 100vh;
+  }
+
+  /* ── Wizard steps ── */
+  .step-badge {
+    width: 2.25rem; height: 2.25rem;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: .85rem;
+    border: 2px solid var(--pwc-gray-light);
+    background: var(--pwc-white);
+    color: var(--pwc-gray);
+    transition: all .25s;
+  }
+  .step-badge.done   { background: var(--pwc-orange); border-color: var(--pwc-orange); color: #fff; }
+  .step-badge.active { background: var(--pwc-black);  border-color: var(--pwc-black);  color: #fff; }
+  .step-label { font-size: .72rem; font-weight: 500; color: var(--pwc-gray); margin-top: .3rem; text-align: center; }
+  .step-label.active { color: var(--pwc-black); font-weight: 700; }
+  .step-connector { flex: 1; height: 2px; background: var(--pwc-gray-light); margin: 0 .25rem; }
+  .step-connector.done { background: var(--pwc-orange); }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--pwc-white);
+    border: 1px solid var(--pwc-gray-light);
+    border-radius: 0;                      /* PwC uses sharp corners */
+    padding: 2rem;
+    border-top: 3px solid var(--pwc-orange);
+    box-shadow: 0 2px 8px rgba(0,0,0,.06);
+  }
+  .card-title {
+    font-size: 1.1rem; font-weight: 700;
+    color: var(--pwc-black);
+    margin-bottom: .25rem;
+    display: flex; align-items: center; gap: .5rem;
+  }
+  .card-title::before {
+    content: '';
+    display: inline-block;
+    width: 4px; height: 1.2rem;
+    background: var(--pwc-orange);
+    border-radius: 1px;
+  }
+
+  /* ── Drop zone ── */
+  .drop-zone {
+    border: 2px dashed var(--pwc-gray-light);
+    background: var(--pwc-gray-bg);
+    padding: 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: all .2s;
+  }
+  .drop-zone:hover, .drop-zone.over {
+    border-color: var(--pwc-orange);
+    background: var(--pwc-orange-light);
+  }
+
+  /* ── Flow cards ── */
+  .flow-card {
+    border: 1px solid var(--pwc-gray-light);
+    border-left: 3px solid transparent;
+    padding: .875rem 1rem;
+    cursor: pointer;
+    transition: all .15s;
+    background: var(--pwc-white);
+  }
+  .flow-card:hover   { border-left-color: var(--pwc-orange-mid); background: #fdf8f6; }
+  .flow-card.selected { border-left-color: var(--pwc-orange); background: var(--pwc-orange-light); }
+  .flow-card input[type=checkbox] { accent-color: var(--pwc-orange); }
+
+  /* ── Connector cards ── */
+  .connector-card { border: 1px solid var(--pwc-gray-light); background: var(--pwc-white); }
+  .connector-card-header {
+    padding: .875rem 1rem;
+    display: flex; align-items: center; gap: .75rem;
+    cursor: pointer; user-select: none;
+    border-left: 4px solid transparent;
+    transition: background .15s;
+  }
+  .connector-card-header:hover { background: #fdf8f6; }
+  .connector-card-header.mock-header { border-left-color: var(--pwc-orange); }
+  .connector-card-header.spy-header  { border-left-color: var(--pwc-warn); }
+  .connector-card-body { padding: 1.25rem 1rem; border-top: 1px solid var(--pwc-gray-light); background: var(--pwc-gray-bg); display: none; }
+  .connector-card-body.open { display: block; }
+
+  /* ── Buttons ── */
+  .btn-primary {
+    background: var(--pwc-orange);
+    color: #fff;
+    padding: .6rem 1.5rem;
+    font-weight: 600; font-size: .875rem;
+    border: none; border-radius: 0;
+    cursor: pointer;
+    transition: background .15s, transform .1s;
+    letter-spacing: .01em;
+  }
+  .btn-primary:hover    { background: var(--pwc-orange-dark); }
+  .btn-primary:active   { transform: scale(.98); }
+  .btn-primary:disabled { background: var(--pwc-gray); cursor: not-allowed; }
+
+  .btn-secondary {
+    background: transparent;
+    color: var(--pwc-black);
+    padding: .6rem 1.25rem;
+    font-weight: 600; font-size: .875rem;
+    border: 1.5px solid var(--pwc-black);
+    border-radius: 0;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .btn-secondary:hover { background: var(--pwc-black); color: #fff; }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--pwc-gray-dark);
+    padding: .5rem 1rem;
+    font-weight: 500; font-size: .8rem;
+    border: 1px solid var(--pwc-gray-light);
+    border-radius: 0;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .btn-ghost:hover { border-color: var(--pwc-orange); color: var(--pwc-orange); }
+
+  /* ── Pills / badges ── */
+  .pill { padding: .2rem .7rem; font-size: .7rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .pill-orange  { background: var(--pwc-orange-light); color: var(--pwc-orange-dark); }
+  .pill-black   { background: var(--pwc-black); color: #fff; }
+  .pill-gray    { background: var(--pwc-gray-light); color: var(--pwc-gray-dark); }
+  .pill-blue    { background: #e8f0fe; color: #1a56db; }
+  .pill-green   { background: #e8f5e9; color: #2e7d32; }
+  .chip-mock    { background: var(--pwc-orange-light); color: var(--pwc-orange-dark); }
+  .chip-spy     { background: #fff3e0; color: #e65100; }
+
+  /* ── Select / Input ── */
+  select, input[type=text], textarea {
+    border: 1px solid var(--pwc-gray-light);
+    border-radius: 0;
+    font-family: inherit;
+    font-size: .875rem;
+    color: var(--pwc-black);
+    background: var(--pwc-white);
+    outline: none;
+    transition: border-color .15s;
+    padding: .5rem .75rem;
+    width: 100%;
+  }
+  select:focus, input[type=text]:focus, textarea:focus {
+    border-color: var(--pwc-orange);
+    box-shadow: 0 0 0 2px rgba(208,74,2,.12);
+  }
+  select:disabled { background: var(--pwc-gray-bg); color: var(--pwc-gray); }
+
+  /* ── Progress bar ── */
+  .progress-track { background: var(--pwc-gray-light); height: 3px; }
+  #genProgress { height: 3px; background: var(--pwc-orange); transition: width .4s ease; }
+
+  /* ── POM code block ── */
+  pre.pom-block {
+    background: var(--pwc-black);
+    color: #f0ede8;
+    padding: 1rem 1.25rem;
+    font-size: .78rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    font-family: 'JetBrains Mono','Fira Code',monospace;
+  }
+
+  /* ── Modal ── */
+  .modal-overlay { position:fixed;inset:0;background:rgba(45,45,45,.6);z-index:100;display:flex;align-items:center;justify-content:center;padding:1rem; }
+  .modal-box { background:var(--pwc-white);width:100%;max-width:700px;max-height:90vh;overflow-y:auto;border-top:4px solid var(--pwc-orange); box-shadow:0 24px 64px rgba(0,0,0,.25); }
+  .modal-header { padding:1.25rem 1.5rem;border-bottom:1px solid var(--pwc-gray-light);display:flex;align-items:center;justify-content:space-between; }
+  .modal-body   { padding:1.5rem; }
+
+  /* ── Tabs ── */
+  .tab-bar { display:flex;gap:0;border-bottom:2px solid var(--pwc-gray-light); }
+  .tab-btn {
+    padding:.5rem 1rem;
+    font-size:.78rem; font-weight:600; letter-spacing:.02em;
+    cursor:pointer; color:var(--pwc-gray);
+    border-bottom:2px solid transparent; margin-bottom:-2px;
+    transition:all .15s;
+  }
+  .tab-btn:hover  { color:var(--pwc-black); }
+  .tab-btn.active { color:var(--pwc-orange); border-bottom-color:var(--pwc-orange); }
+
+  /* ── KV editor ── */
+  .kv-row { display:grid;grid-template-columns:1fr 1fr auto;gap:.5rem;margin-bottom:.4rem; }
+
+  /* ── XML output ── */
+  textarea.xml-out {
+    font-family:'JetBrains Mono','Fira Code',monospace;
+    font-size:.76rem;
+    background:var(--pwc-black);
+    color:#f0ede8;
+    width:100%; resize:vertical;
+    padding:.875rem;
+    border:none;
+  }
+  textarea.sample-input {
+    font-family:'JetBrains Mono','Fira Code',monospace;
+    font-size:.78rem;
+    resize:vertical;
+  }
+
+  /* ── Toast ── */
+  #toast {
+    position:fixed;bottom:1.5rem;right:1.5rem;
+    padding:.75rem 1.25rem;
+    font-weight:600; font-size:.875rem;
+    box-shadow:0 4px 16px rgba(0,0,0,.2);
+    transform:translateY(4rem);transition:transform .3s;z-index:200;
+    border-left:4px solid transparent;
+  }
+  #toast.show { transform:translateY(0); }
+  #toast.success { background:#fff;border-left-color:var(--pwc-orange);color:var(--pwc-black); }
+  #toast.error   { background:var(--pwc-error);border-left-color:#900;color:#fff; }
+
+  /* ── Summary stat boxes ── */
+  .stat-box {
+    background:var(--pwc-gray-bg);
+    border:1px solid var(--pwc-gray-light);
+    border-top:3px solid var(--pwc-orange);
+    padding:1rem;
+    text-align:center;
+  }
+  .stat-box .stat-val { font-size:1.4rem;font-weight:700;color:var(--pwc-black); }
+  .stat-box .stat-lbl { font-size:.72rem;font-weight:500;color:var(--pwc-gray);margin-top:.15rem;text-transform:uppercase;letter-spacing:.05em; }
+</style>
 </head>
-<body class="bg-gray-50">
-    <!-- Header -->
-    <header class="enhanced-feature text-white shadow-lg">
-        <div class="container mx-auto px-4 py-6">
-            <div>
-                <h1 class="text-3xl font-bold">MUnit Generation Agent</h1>
-                <p class="text-purple-100 mt-1">Generate MUnit test suites from Mule applications and business use cases</p>
-                <div class="flex items-center mt-2 space-x-4">
-                    <span class="bg-green-500 text-xs px-2 py-1 rounded-full">Flow Aware</span>
-                    <span class="bg-blue-500 text-xs px-2 py-1 rounded-full">Business Context</span>
-                    <span class="bg-purple-500 text-xs px-2 py-1 rounded-full">Local & GitHub Inputs</span>
-                </div>
-            </div>
-        </div>
-    </header>
-
-    <!-- Main Content -->
-    <main class="container mx-auto px-4 py-8">
-        <!-- Generation Form -->
-        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
-            <h2 class="text-2xl font-semibold mb-6">Generate MUnit Test Suite</h2>
-            
-            <!-- Generation Mode Toggle -->
-            <div class="mb-6 p-4 bg-gradient-to-r from-purple-50 to-blue-50 rounded-lg border border-purple-200">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <h3 class="font-semibold text-purple-800">Smart Generation Mode</h3>
-                        <p class="text-sm text-purple-600">Use flow-aware analysis and business context for broader MUnit coverage</p>
-                    </div>
-                    <label class="relative inline-flex items-center cursor-pointer">
-                        <input type="checkbox" id="enhancedMode" class="sr-only peer" checked>
-                        <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
-                    </label>
-                </div>
-            </div>
-
-            <!-- Mule/MUnit version targeting -->
-            <div class="mb-6 p-4 bg-white rounded-lg border border-gray-200">
-                <h3 class="text-lg font-medium mb-3">Build Target (Optional)</h3>
-                <p class="text-sm text-gray-600 mb-4">
-                    Use this if your project doesn’t include a <code>pom.xml</code> in the uploaded ZIP, or if you want to force a specific Mule runtime / MUnit target for generation.
-                </p>
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Mule Runtime</label>
-                        <select id="targetMuleRuntime" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500" onchange="updateMunitVersionHint()">
-                            <option value="">Auto (from pom.xml)</option>
-                            <option value="4.1">Mule 4.1.x</option>
-                            <option value="4.2">Mule 4.2.x</option>
-                            <option value="4.3">Mule 4.3.x</option>
-                            <option value="4.4">Mule 4.4.x</option>
-                            <option value="4.5">Mule 4.5.x</option>
-                            <option value="4.6">Mule 4.6.x</option>
-                            <option value="4.7">Mule 4.7.x</option>
-                            <option value="4.8">Mule 4.8.x</option>
-                            <option value="4.9">Mule 4.9.x</option>
-                            <option value="4.10">Mule 4.10+ / latest</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">MUnit Target</label>
-                        <select id="targetMunitSeries" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500" onchange="toggleCustomMunitVersion(); updateMunitVersionHint();">
-                            <option value="">Auto (from pom.xml or Mule runtime)</option>
-                            <optgroup label="MUnit 2.x — Mule 4.1–4.4">
-                              <option value="2.1.5">MUnit 2.1.5 (Mule 4.1)</option>
-                              <option value="2.2.5">MUnit 2.2.5 (Mule 4.2)</option>
-                              <option value="2.3.15">MUnit 2.3.15 (Mule 4.3–4.4)</option>
-                            </optgroup>
-                            <optgroup label="MUnit 3.x — Mule 4.5+">
-                              <option value="3.3.0">MUnit 3.3.0 (Mule 4.5)</option>
-                              <option value="3.6.0">MUnit 3.6.0 (Mule 4.6+ / latest)</option>
-                            </optgroup>
-                            <option value="custom">Custom version…</option>
-                        </select>
-                    </div>
-                    <div id="customMunitContainer" class="hidden">
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Custom MUnit Version</label>
-                        <input type="text" id="customMunitVersion" placeholder="e.g. 2.3.15 or 3.6.0" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
-                        <p class="text-xs text-gray-500 mt-1">Use an exact Maven version like <code>2.3.15</code> or <code>3.6.0</code>.</p>
-                    </div>
-                </div>
-                <div id="munitVersionHint" class="mt-2 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded p-2 hidden"></div>
-            </div>
-
-            <!-- XML Source Tabs -->
-            <div class="mb-6">
-                <h3 class="text-lg font-medium mb-3">Mule XML Source</h3>
-                <div class="flex space-x-1 mb-4">
-                    <button onclick="switchTab('xml', 'local')" class="tab-btn px-4 py-2 bg-purple-500 text-white rounded-t" data-tab="xml-local">Local Upload</button>
-                    <button onclick="switchTab('xml', 'github')" class="tab-btn px-4 py-2 bg-gray-200 text-gray-700 rounded-t" data-tab="xml-github">GitHub</button>
-                </div>
-
-                <!-- Local XML Files / Project ZIP -->
-                <div id="xml-local" class="tab-content active">
-                    <div class="drop-zone border-2 border-dashed border-gray-300 rounded-lg p-6 text-center" 
-                         ondrop="handleDrop(event, 'xml')" 
-                         ondragover="handleDragOver(event)" 
-                         ondragleave="handleDragLeave(event)">
-                        <input type="file" id="xmlFile" accept=".xml,.mule,.zip,.jar,.rar,.7z" multiple class="hidden" onchange="handleFileSelect('xml')">
-                        <label for="xmlFile" class="cursor-pointer">
-                            <div class="text-gray-600">
-                                <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                                </svg>
-                                <p class="mt-2">Click to upload or drag & drop Mule XML files or a project ZIP</p>
-                                <p class="text-sm text-gray-500">.xml, .mule, .zip, .jar, .rar, .7z files (multiple files supported)</p>
-                                <p class="text-xs text-purple-600 mt-1">Use this one option for individual Mule files or a full project archive</p>
-                            </div>
-                        </label>
-                        <div id="xmlFileList" class="mt-4 space-y-2"></div>
-                    </div>
-                </div>
-
-                <!-- GitHub XML -->
-                <div id="xml-github" class="tab-content">
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Repository</label>
-                            <input type="text" id="githubRepo" placeholder="owner/repo-name" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Branch</label>
-                            <input type="text" id="githubBranch" value="main" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
-                        </div>
-                        <div class="md:col-span-2">
-                            <label class="block text-sm font-medium text-gray-700 mb-1">File Path</label>
-                            <input type="text" id="githubFilePath" placeholder="src/main/mule/my-api.xml" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
-                        </div>
-                        <div class="md:col-span-2">
-                            <label class="block text-sm font-medium text-gray-700 mb-1">GitHub Token (optional)</label>
-                            <input type="password" id="githubToken" placeholder="ghp_xxxx" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Use Case Source Tabs -->
-            <div class="mb-6">
-                <h3 class="text-lg font-medium mb-3">Business Use Case Source <span class="text-sm text-gray-500 font-normal">(Optional - enhances test scenarios)</span></h3>
-                <div class="flex space-x-1 mb-4">
-                    <button onclick="switchTab('usecase', 'local')" class="tab-btn px-4 py-2 bg-purple-500 text-white rounded-t" data-tab="usecase-local">Local Upload</button>
-                    <button onclick="switchTab('usecase', 'confluence')" class="tab-btn px-4 py-2 bg-gray-200 text-gray-700 rounded-t" data-tab="usecase-confluence">Confluence</button>
-                    <button onclick="switchTab('usecase', 'none')" class="tab-btn px-4 py-2 bg-gray-200 text-gray-700 rounded-t" data-tab="usecase-none">Skip (Use Default)</button>
-                </div>
-
-                <!-- Local Use Case Files / ZIP -->
-                <div id="usecase-local" class="tab-content active">
-                    <div class="drop-zone border-2 border-dashed border-gray-300 rounded-lg p-6 text-center"
-                         ondrop="handleDrop(event, 'usecase')" 
-                         ondragover="handleDragOver(event)" 
-                         ondragleave="handleDragLeave(event)">
-                        <input type="file" id="usecaseFile" accept=".txt,.pdf,.docx,.doc,.md,.zip,.rar,.7z" multiple class="hidden" onchange="handleFileSelect('usecase')">
-                        <label for="usecaseFile" class="cursor-pointer">
-                            <div class="text-gray-600">
-                                <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                                </svg>
-                                <p class="mt-2">Click to upload or drag & drop use case documents or a ZIP folder</p>
-                                <p class="text-sm text-gray-500">.txt, .pdf, .docx, .doc, .md, .zip, .rar, .7z files (multiple files supported)</p>
-                                <p class="text-xs text-purple-600 mt-1">Use this one option for local documents or a full use case archive</p>
-                            </div>
-                        </label>
-                        <div id="usecaseFileList" class="mt-4 space-y-2"></div>
-                    </div>
-                </div>
-
-                <!-- Confluence Use Case -->
-                <div id="usecase-confluence" class="tab-content">
-                    <div class="grid grid-cols-1 gap-4">
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Confluence Page URL</label>
-                            <input type="url" id="confluenceUrl" placeholder="https://company.atlassian.net/wiki/spaces/XX/pages/123456" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
-                        </div>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">API Token</label>
-                                <input type="password" id="confluenceToken" placeholder="Confluence API token" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
-                            </div>
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                                <input type="email" id="confluenceEmail" placeholder="your.email@company.com" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Skip Use Case -->
-                <div id="usecase-none" class="tab-content">
-                    <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                        <div class="flex">
-                            <div class="flex-shrink-0">
-                                <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-                                </svg>
-                            </div>
-                            <div class="ml-3">
-                                <h3 class="text-sm font-medium text-yellow-800">Using Default Scenarios</h3>
-                                <div class="mt-2 text-sm text-yellow-700">
-                                    <p>No business use case provided. The system will generate default test scenarios based on your Mule flow type.</p>
-                                    <p class="mt-1"><strong>Smart generation:</strong> Default flow-based analysis will still be applied.</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Output Options -->
-            <div class="mb-6">
-                <h3 class="text-lg font-medium mb-3">Output Options</h3>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Output Directory</label>
-                    <input type="text" id="outputPath" value="./output/" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
-                </div>
-            </div>
-
-            <div class="mb-6">
-                <div class="mb-3">
-                    <h3 class="text-lg font-medium">Flow Selection</h3>
-                    <p class="text-sm text-gray-600">The app analyzes the Mule code automatically and shows the main parent flows here.</p>
-                </div>
-                <div id="flowSelectionSection" class="hidden border border-gray-200 rounded-lg p-4 bg-gray-50">
-                    <div id="flowSelectionSummary" class="text-sm text-gray-700 mb-3"></div>
-                    <div class="mb-3">
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Select Flow</label>
-                        <select id="flowSelect" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500"></select>
-                    </div>
-                    <div id="flowSelectionHint" class="text-xs text-gray-500"></div>
-                </div>
-                <div id="flowSelectionPlaceholder" class="text-sm text-gray-500 bg-gray-50 border border-dashed border-gray-300 rounded-lg p-4">
-                    Upload the Mule app and the flow dropdown will be prepared automatically.
-                </div>
-            </div>
-
-            <!-- POM Dependency Banner (blocking) -->
-            <div id="pomBanner" class="hidden mb-6"></div>
-
-            <!-- Connector Samples Section -->
-            <div class="mb-6">
-                <h3 class="text-lg font-medium mb-1">Connector Mock Samples <span class="text-sm font-normal text-gray-500">(optional but strongly recommended)</span></h3>
-                <p class="text-sm text-gray-600 mb-3">
-                    After analysis, the app lists the outbound connectors that will be mocked.
-                    Provide a sample request and response for each connector so the generated mock files use real contract data instead of inferred fallback values.
-                </p>
-                <div id="connectorSamplesContainer" class="hidden space-y-4">
-                </div>
-                <div id="connectorSamplesHint" class="text-sm text-gray-500 bg-blue-50 border border-blue-200 rounded-lg p-3">
-                    Select a flow above to see the connectors that need mock samples.
-                </div>
-            </div>
-
-            <!-- Generation Review Section -->
-            <div class="mb-6">
-                <h3 class="text-lg font-medium mb-1">Generation Review</h3>
-                <p class="text-sm text-gray-600 mb-3">
-                    Review the flow, mocks, scenarios, and assertion approach before creating files.
-                </p>
-                <div id="generationReview" class="hidden border border-gray-200 rounded-lg bg-gray-50 p-4"></div>
-                <div id="generationReviewHint" class="text-sm text-gray-500 bg-gray-50 border border-dashed border-gray-300 rounded-lg p-4">
-                    Flow analysis will prepare the generation review automatically.
-                </div>
-            </div>
-
-            <!-- Generate Button -->
-            <div class="flex justify-center">
-                <button onclick="generateEnhancedMUnit()" class="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white font-bold py-3 px-8 rounded-lg transition duration-200 transform hover:scale-105 shadow-lg">
-                    <span class="flex items-center">
-                        <svg class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                        </svg>
-                        Generate MUnit Test Suite
-                    </span>
-                </button>
-            </div>
-        </div>
-
-        <!-- Progress Section -->
-        <div id="progressSection" class="hidden bg-white rounded-lg shadow-md p-6 mb-6 fade-in">
-            <h3 class="text-xl font-semibold mb-4">Generation Progress</h3>
-            <div class="mb-4">
-                <div class="flex justify-between mb-2">
-                    <span id="progressMessage">Starting generation...</span>
-                    <span id="progressPercent">0%</span>
-                </div>
-                <div class="w-full bg-gray-200 rounded-full h-3">
-                    <div id="progressBar" class="progress-bar bg-gradient-to-r from-purple-600 to-blue-600 h-3 rounded-full" style="width: 0%"></div>
-                </div>
-            </div>
-            <div id="enhancedProgressDetails" class="mt-4 text-sm text-gray-600"></div>
-        </div>
-
-        <!-- Results Section -->
-        <div id="resultsSection" class="hidden bg-white rounded-lg shadow-md p-6 fade-in">
-            <h3 class="text-xl font-semibold mb-4">Generation Results</h3>
-            <div id="resultsContent"></div>
-        </div>
-    </main>
-
-    <!-- Footer -->
-    <footer class="bg-gray-800 text-white py-6 mt-12">
-        <div class="container mx-auto px-4 text-center">
-            <p>MUnit Generation Agent</p>
-            <p class="text-gray-400 text-sm mt-1">Flow-aware MUnit generation for MuleSoft developers</p>
-        </div>
-    </footer>
-
-    <script>
-        let currentJobId = null;
-        let progressInterval = null;
-        let uploadedFolder = null;
-        let analyzedFlowSelection = null;
-        let analyzedBuildValidation = null;
-        let connectorSampleValues = {};
-        let flowAnalysisInFlight = false;
-        let lastFlowAnalysisSignature = null;
-
-        // Drag and drop handlers
-        function handleDragOver(event) {
-            event.preventDefault();
-            event.currentTarget.classList.add('dragover');
-        }
-
-        function handleDragLeave(event) {
-            event.currentTarget.classList.remove('dragover');
-        }
-
-        function handleDrop(event, type) {
-            event.preventDefault();
-            event.currentTarget.classList.remove('dragover');
-            
-            const files = event.dataTransfer.files;
-            const fileInput = document.getElementById(type === 'xml' ? 'xmlFile' : 'usecaseFile');
-            
-            // Create new FileList with dropped files
-            const dataTransfer = new DataTransfer();
-            for (let file of files) {
-                dataTransfer.items.add(file);
-            }
-            fileInput.files = dataTransfer.files;
-            
-            handleFileSelect(type);
-        }
-
-        function handleFolderDrop(event) {
-            event.preventDefault();
-            event.currentTarget.classList.remove('dragover');
-            
-            const files = event.dataTransfer.files;
-            if (files.length > 0) {
-                processFolderFile(files[0]);
-            }
-        }
-
-        // Folder processing
-        function processFolderFile(file) {
-            uploadedFolder = file;
-            const folderInfo = document.getElementById('folderInfo');
-            
-            folderInfo.innerHTML = `
-                <div class="bg-green-50 border border-green-200 rounded-lg p-4">
-                    <div class="flex items-center">
-                        <svg class="h-5 w-5 text-green-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                        <div>
-                            <p class="font-medium text-green-800">Project folder ready</p>
-                            <p class="text-sm text-green-600">${file.name} (${formatFileSize(file.size)})</p>
-                            <p class="text-xs text-green-500 mt-1">Will be processed with project file discovery</p>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
-
-        // Folder selection handlers
-        function handleFolderSelect(event) {
-            const file = event.target.files[0];
-            if (file) {
-                processFolderFile(file);
-            }
-        }
-
-        // Tab switching
-        function switchTab(type, source) {
-            // Hide all tab contents
-            document.querySelectorAll(`[id^="${type}-"]`).forEach(tab => {
-                tab.classList.remove('active');
-            });
-            
-            // Show selected tab
-            document.getElementById(`${type}-${source}`).classList.add('active');
-            
-            // Update button styles
-            document.querySelectorAll(`[data-tab^="${type}-"]`).forEach(btn => {
-                btn.classList.remove('bg-purple-500', 'text-white');
-                btn.classList.add('bg-gray-200', 'text-gray-700');
-            });
-            
-            const activeBtn = document.querySelector(`[data-tab="${type}-${source}"]`);
-            activeBtn.classList.remove('bg-gray-200', 'text-gray-700');
-            activeBtn.classList.add('bg-purple-500', 'text-white');
-
-            if (type === 'xml') {
-                analyzedFlowSelection = null;
-                connectorSampleValues = {};
-                lastFlowAnalysisSignature = null;
-                document.getElementById('flowSelectionSection').classList.add('hidden');
-                document.getElementById('flowSelectionPlaceholder').classList.remove('hidden');
-                renderConnectorSamples();
-                document.getElementById('pomBanner').classList.add('hidden');
-                document.getElementById('pomBanner').innerHTML = '';
-                if (source === 'github') {
-                    triggerAutoFlowAnalysis();
-                } else if (document.getElementById('xmlFile').files.length > 0) {
-                    triggerAutoFlowAnalysis();
-                }
-            }
-        }
-
-        // File selection handling
-        function handleFileSelect(type) {
-            const fileInput = document.getElementById(type === 'xml' ? 'xmlFile' : 'usecaseFile');
-            
-            if (type === 'xml') {
-                const fileListDiv = document.getElementById('xmlFileList');
-                fileListDiv.innerHTML = '';
-                
-                if (fileInput.files.length > 0) {
-                    // Validate files are XML or ZIP
-                    const validFiles = [];
-                    const invalidFiles = [];
-                    
-                    for (let i = 0; i < fileInput.files.length; i++) {
-                        const file = fileInput.files[i];
-                        if (file.name.toLowerCase().endsWith('.xml') || 
-                            file.name.toLowerCase().endsWith('.zip') || 
-                            file.name.toLowerCase().endsWith('.rar') || 
-                            file.name.toLowerCase().endsWith('.7z')) {
-                            validFiles.push(file);
-                        } else {
-                            invalidFiles.push(file);
-                        }
-                    }
-                    
-                    if (invalidFiles.length > 0) {
-                        // Show warning for invalid files
-                        const warningDiv = document.createElement('div');
-                        warningDiv.className = 'bg-yellow-50 border border-yellow-200 text-yellow-800 p-3 rounded mb-2';
-                        warningDiv.innerHTML = `
-                            <div class="flex">
-                                <div class="flex-shrink-0">
-                                    <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
-                                        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-                                    </svg>
-                                </div>
-                                <div class="ml-3">
-                                    <h3 class="text-sm font-medium text-yellow-800">Invalid Files Detected</h3>
-                                    <div class="text-sm text-yellow-700 mt-1">
-                                        The following files are not XML or ZIP and will be skipped:
-                                        <ul class="list-disc list-inside mt-1">
-                                            ${invalidFiles.map(f => `<li>${f.name}</li>`).join('')}
-                                        </ul>
-                                    </div>
-                                </div>
-                            </div>
-                        `;
-                        fileListDiv.appendChild(warningDiv);
-                    }
-                    
-                    if (validFiles.length > 0) {
-                        const fileCount = validFiles.length;
-                        const headerDiv = document.createElement('div');
-                        headerDiv.className = 'text-sm font-medium text-gray-700 mb-2';
-                        
-                        // Check if we have ZIP files
-                        const hasZipFiles = validFiles.some(f => f.name.toLowerCase().endsWith('.zip'));
-                        const hasXmlFiles = validFiles.some(f => f.name.toLowerCase().endsWith('.xml'));
-                        
-                        if (hasZipFiles && hasXmlFiles) {
-                            headerDiv.textContent = `Selected ${fileCount} files (XML + ZIP):`;
-                        } else if (hasZipFiles) {
-                            headerDiv.textContent = `Selected ${fileCount} project ZIP file${fileCount > 1 ? 's' : ''}:`;
-                        } else {
-                            headerDiv.textContent = `Selected ${fileCount} Mule XML file${fileCount > 1 ? 's' : ''}:`;
-                        }
-                        
-                        fileListDiv.appendChild(headerDiv);
-                        
-                        for (let i = 0; i < validFiles.length; i++) {
-                            const file = validFiles[i];
-                            const isZip = file.name.toLowerCase().endsWith('.zip');
-                            const fileItem = document.createElement('div');
-                            fileItem.className = 'file-item flex items-center justify-between bg-gray-50 p-2 rounded border';
-                            fileItem.innerHTML = `
-                                <div class="flex items-center">
-                                    <svg class="h-4 w-4 ${isZip ? 'text-purple-500' : 'text-green-500'} mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        ${isZip ? 
-                                            '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2H5a2 2 0 00-2 2z" />' :
-                                            '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />'
-                                        }
-                                    </svg>
-                                    <span class="text-sm text-gray-700">${file.name}</span>
-                                    <span class="text-xs text-gray-500 ml-2">(${formatFileSize(file.size)})</span>
-                                    ${isZip ? '<span class="text-xs text-purple-600 ml-2">Project Folder</span>' : ''}
-                                </div>
-                                <button onclick="removeXmlFile(${i})" class="text-red-500 hover:text-red-700 text-sm">
-                                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                    </svg>
-                                </button>
-                            `;
-                            fileListDiv.appendChild(fileItem);
-                        }
-                    } else {
-                        const emptyDiv = document.createElement('div');
-                        emptyDiv.className = 'text-red-600 text-sm';
-                        emptyDiv.textContent = 'No valid XML or ZIP files selected. Please select .xml files or .zip project folders.';
-                        fileListDiv.appendChild(emptyDiv);
-                    }
-                }
-            } else if (type === 'usecase') {
-                const fileListDiv = document.getElementById('usecaseFileList');
-                fileListDiv.innerHTML = '';
-                
-                if (fileInput.files.length > 0) {
-                    const validFiles = [];
-                    const invalidFiles = [];
-
-                    for (let i = 0; i < fileInput.files.length; i++) {
-                        const file = fileInput.files[i];
-                        if (
-                            file.name.toLowerCase().endsWith('.txt') ||
-                            file.name.toLowerCase().endsWith('.pdf') ||
-                            file.name.toLowerCase().endsWith('.docx') ||
-                            file.name.toLowerCase().endsWith('.doc') ||
-                            file.name.toLowerCase().endsWith('.md') ||
-                            file.name.toLowerCase().endsWith('.zip') ||
-                            file.name.toLowerCase().endsWith('.rar') ||
-                            file.name.toLowerCase().endsWith('.7z')
-                        ) {
-                            validFiles.push(file);
-                        } else {
-                            invalidFiles.push(file);
-                        }
-                    }
-
-                    if (invalidFiles.length > 0) {
-                        const warningDiv = document.createElement('div');
-                        warningDiv.className = 'bg-yellow-50 border border-yellow-200 text-yellow-800 p-3 rounded mb-2';
-                        warningDiv.innerHTML = `
-                            <div class="text-sm">
-                                Unsupported files will be skipped:
-                                <ul class="list-disc list-inside mt-1">
-                                    ${invalidFiles.map(f => `<li>${f.name}</li>`).join('')}
-                                </ul>
-                            </div>
-                        `;
-                        fileListDiv.appendChild(warningDiv);
-                    }
-
-                    if (validFiles.length === 0) {
-                        const emptyDiv = document.createElement('div');
-                        emptyDiv.className = 'text-red-600 text-sm';
-                        emptyDiv.textContent = 'No valid use case files selected. Please select documents or ZIP folders.';
-                        fileListDiv.appendChild(emptyDiv);
-                        return;
-                    }
-
-                    const fileCount = validFiles.length;
-                    const headerDiv = document.createElement('div');
-                    headerDiv.className = 'text-sm font-medium text-gray-700 mb-2';
-                    const hasArchives = validFiles.some(file =>
-                        file.name.toLowerCase().endsWith('.zip') ||
-                        file.name.toLowerCase().endsWith('.rar') ||
-                        file.name.toLowerCase().endsWith('.7z')
-                    );
-                    headerDiv.textContent = hasArchives
-                        ? `Selected ${fileCount} use case upload${fileCount > 1 ? 's' : ''} (documents + archives):`
-                        : `Selected ${fileCount} file${fileCount > 1 ? 's' : ''}:`;
-                    fileListDiv.appendChild(headerDiv);
-                    
-                    for (let i = 0; i < validFiles.length; i++) {
-                        const file = validFiles[i];
-                        const isArchive = file.name.toLowerCase().endsWith('.zip') ||
-                            file.name.toLowerCase().endsWith('.rar') ||
-                            file.name.toLowerCase().endsWith('.7z');
-                        const fileItem = document.createElement('div');
-                        fileItem.className = 'file-item flex items-center justify-between bg-gray-50 p-2 rounded border';
-                        fileItem.innerHTML = `
-                            <div class="flex items-center">
-                                <svg class="h-4 w-4 text-blue-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                </svg>
-                                <span class="text-sm text-gray-700">${file.name}</span>
-                                <span class="text-xs text-gray-500 ml-2">(${formatFileSize(file.size)})</span>
-                                ${isArchive ? '<span class="text-xs text-blue-600 ml-2">ZIP Folder</span>' : ''}
-                            </div>
-                            <button onclick="removeUsecaseFile(${i})" class="text-red-500 hover:text-red-700 text-sm">
-                                <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                </svg>
-                            </button>
-                        `;
-                        fileListDiv.appendChild(fileItem);
-                    }
-                }
-            }
-
-            if (type === 'xml') {
-                lastFlowAnalysisSignature = null;
-                triggerAutoFlowAnalysis();
-            }
-        }
-        
-        // Format file size
-        function formatFileSize(bytes) {
-            if (bytes === 0) return '0 Bytes';
-            const k = 1024;
-            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-        }
-        
-        // Remove file functions
-        function removeUsecaseFile(index) {
-            const fileInput = document.getElementById('usecaseFile');
-            const dt = new DataTransfer();
-            
-            for (let i = 0; i < fileInput.files.length; i++) {
-                if (i !== index) {
-                    dt.items.add(fileInput.files[i]);
-                }
-            }
-            
-            fileInput.files = dt.files;
-            handleFileSelect('usecase');
-        }
-        
-        function removeXmlFile(index) {
-            const fileInput = document.getElementById('xmlFile');
-            const dt = new DataTransfer();
-            
-            for (let i = 0; i < fileInput.files.length; i++) {
-                if (i !== index) {
-                    dt.items.add(fileInput.files[i]);
-                }
-            }
-            
-            fileInput.files = dt.files;
-            handleFileSelect('xml');
-        }
-
-        async function analyzeFlows() {
-            try {
-                if (!canAnalyzeFlows()) {
-                    return;
-                }
-
-                flowAnalysisInFlight = true;
-                setFlowSelectionLoadingState('Analyzing Mule flows automatically...');
-                const formData = buildGenerationFormData(false);
-                const response = await axios.post('/api/enhanced/analyze-flows', formData, {
-                    headers: { 'Content-Type': 'multipart/form-data' }
-                });
-
-                if (!response.data.success) {
-                    flowAnalysisInFlight = false;
-                    showError(response.data.error || 'Failed to analyze flows');
-                    return;
-                }
-
-                analyzedFlowSelection = response.data.selection;
-                analyzedBuildValidation = response.data.build_validation || null;
-                lastFlowAnalysisSignature = getFlowAnalysisSignature();
-                renderFlowSelection(response.data.selection, analyzedBuildValidation);
-                renderPomBanner(analyzedBuildValidation);
-                renderConnectorSamples();
-                renderGenerationReview();
-                flowAnalysisInFlight = false;
-            } catch (error) {
-                flowAnalysisInFlight = false;
-                showError('Failed to analyze flows: ' + (error.response?.data?.error || error.message));
-            }
-        }
-
-        function triggerAutoFlowAnalysis() {
-            analyzedFlowSelection = null;
-            connectorSampleValues = {};
-            analyzedBuildValidation = null;
-            const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
-            const signature = getFlowAnalysisSignature();
-            if (!signature || signature === lastFlowAnalysisSignature) {
-                return;
-            }
-            if (xmlSource === 'local' && document.getElementById('xmlFile').files.length > 0) {
-                analyzeFlows();
-            } else if (xmlSource === 'github' && canAnalyzeFlows()) {
-                analyzeFlows();
-            }
-        }
-
-        function getFlowAnalysisSignature() {
-            const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
-            if (xmlSource === 'local') {
-                const xmlFiles = Array.from(document.getElementById('xmlFile').files || []);
-                if (!xmlFiles.length) return '';
-                return xmlFiles.map(file => `${file.name}:${file.size}:${file.lastModified}`).join('|');
-            }
-            const repo = document.getElementById('githubRepo').value || '';
-            const branch = document.getElementById('githubBranch').value || '';
-            const path = document.getElementById('githubFilePath').value || '';
-            return [repo, branch, path].join('|');
-        }
-
-        function canAnalyzeFlows() {
-            const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
-            if (flowAnalysisInFlight) {
-                return false;
-            }
-            if (xmlSource === 'local') {
-                return document.getElementById('xmlFile').files.length > 0;
-            }
-            return Boolean(document.getElementById('githubRepo').value && document.getElementById('githubFilePath').value);
-        }
-
-        function renderFlowSelection(selection, buildValidation = null) {
-            const section = document.getElementById('flowSelectionSection');
-            const summary = document.getElementById('flowSelectionSummary');
-            const flowSelect = document.getElementById('flowSelect');
-            const hint = document.getElementById('flowSelectionHint');
-            const placeholder = document.getElementById('flowSelectionPlaceholder');
-
-            section.classList.remove('hidden');
-            placeholder.classList.add('hidden');
-            summary.innerHTML = `
-                <strong>Job Type:</strong> ${selection.job_type || 'N/A'}<br>
-                <strong>Available Parent Flows:</strong> ${selection.recommended_flows.length || selection.all_flows.length}
-                ${generateBuildValidationSummary(buildValidation)}
-            `;
-
-            const flowOptions = selection.recommended_flows.length ? selection.recommended_flows : selection.all_flows;
-            flowSelect.innerHTML = flowOptions.map(flow => `
-                <option value="${escapeHtml(flow.name)}">${escapeHtml(flow.display_name || flow.name)}</option>
-            `).join('');
-
-            const selectedFlow = flowOptions[0];
-            hint.textContent = selectedFlow
-                ? `${selectedFlow.selection_reason || ''} Child flows referenced by this parent flow will be included automatically.`
-                : 'No selectable parent flows were found.';
-            flowSelect.onchange = () => {
-                updateFlowSelectionHint();
-                renderConnectorSamples();
-                renderGenerationReview();
-            };
-        }
-
-        function generateBuildValidationSummary(buildValidation) {
-            if (!buildValidation || !buildValidation.has_pom) {
-                return '<br><span class="text-amber-700"><strong>POM Check:</strong> pom.xml not found in upload, MUnit dependencies could not be verified.</span>';
-            }
-            const status = buildValidation.status === 'ready'
-                ? '<span class="text-green-700">Ready</span>'
-                : '<span class="text-amber-700">Needs attention</span>';
-            const warnings = buildValidation.warnings || [];
-            const latest = buildValidation.latest_lookup_status === 'resolved'
-                ? ` Latest stable: MUnit ${buildValidation.latest_munit_version || 'unknown'}, plugin ${buildValidation.latest_munit_plugin_version || 'unknown'}.`
-                : '';
-            const recommended = buildValidation.recommended_munit_version
-                ? ` Recommended for this project: MUnit ${buildValidation.recommended_munit_version}${buildValidation.mule_runtime_version ? ` (Mule ${buildValidation.mule_runtime_version})` : ''}.`
-                : '';
-            return `
-                <br><strong>POM Check:</strong> ${status}
-                ${recommended ? `<br><span class="text-gray-700">${escapeHtml(recommended)}</span>` : ''}
-                ${latest ? `<br><span class="text-gray-700">${escapeHtml(latest)}</span>` : ''}
-                ${warnings.length ? `<br><span class="text-amber-700">${warnings.map(escapeHtml).join('<br>')}</span>` : ''}
-            `;
-        }
-
-        function getSelectedFlows() {
-            const flowSelect = document.getElementById('flowSelect');
-            return flowSelect && flowSelect.value ? [flowSelect.value] : [];
-        }
-
-        function updateFlowSelectionHint() {
-            if (!analyzedFlowSelection) return;
-            const flowSelect = document.getElementById('flowSelect');
-            const hint = document.getElementById('flowSelectionHint');
-            const options = analyzedFlowSelection.recommended_flows.length
-                ? analyzedFlowSelection.recommended_flows
-                : analyzedFlowSelection.all_flows;
-            const flow = options.find(item => item.name === flowSelect.value);
-            if (!flow) return;
-            hint.textContent = `${flow.selection_reason || ''} ${flow.child_flows.length ? `Included child flows: ${flow.child_flows.join(', ')}.` : 'No child flows linked to this parent flow.'}`;
-        }
-
-        function setFlowSelectionLoadingState(message) {
-            const section = document.getElementById('flowSelectionSection');
-            const summary = document.getElementById('flowSelectionSummary');
-            const placeholder = document.getElementById('flowSelectionPlaceholder');
-            section.classList.remove('hidden');
-            placeholder.classList.add('hidden');
-            summary.textContent = message;
-            document.getElementById('flowSelect').innerHTML = '<option>Loading flows...</option>';
-            document.getElementById('flowSelectionHint').textContent = '';
-        }
-
-        function buildGenerationFormData(includeSelectedFlows = true) {
-            const formData = new FormData();
-            const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
-            const usecaseSource = document.querySelector('#usecase-local.active') ? 'local' : 
-                                 document.querySelector('#usecase-confluence.active') ? 'confluence' : 'none';
-
-            formData.append('enhanced_mode', document.getElementById('enhancedMode').checked);
-            formData.append('xml_source', xmlSource);
-            formData.append('usecase_source', usecaseSource);
-            formData.append('output_path', document.getElementById('outputPath').value);
-            formData.append('target_mule_runtime', document.getElementById('targetMuleRuntime')?.value || '');
-            formData.append('target_munit_series', document.getElementById('targetMunitSeries')?.value || '');
-            formData.append('target_munit_custom', document.getElementById('customMunitVersion')?.value || '');
-
-            if (xmlSource === 'local') {
-                const xmlFiles = document.getElementById('xmlFile').files;
-                for (let i = 0; i < xmlFiles.length; i++) {
-                    formData.append('xml_file', xmlFiles[i]);
-                }
-            } else {
-                formData.append('github_repo', document.getElementById('githubRepo').value);
-                formData.append('github_branch', document.getElementById('githubBranch').value);
-                formData.append('github_file_path', document.getElementById('githubFilePath').value);
-                formData.append('github_token', document.getElementById('githubToken').value);
-            }
-
-            if (usecaseSource === 'local') {
-                const usecaseFiles = document.getElementById('usecaseFile').files;
-                for (let i = 0; i < usecaseFiles.length; i++) {
-                    formData.append('usecase_file', usecaseFiles[i]);
-                }
-            } else if (usecaseSource === 'confluence') {
-                formData.append('confluence_url', document.getElementById('confluenceUrl').value);
-                formData.append('confluence_token', document.getElementById('confluenceToken').value);
-                formData.append('confluence_email', document.getElementById('confluenceEmail').value);
-            }
-
-            if (includeSelectedFlows) {
-                formData.append('selected_flows', JSON.stringify(getSelectedFlows()));
-                formData.append('connector_samples', JSON.stringify(collectConnectorSamples()));
-            }
-
-            return formData;
-        }
-
-        // Client-side version compatibility map (mirrors MULE_RUNTIME_MUNIT_VERSIONS in app.py)
-        const MULE_MUNIT_COMPAT = {
-            '4.1': '2.1.5',  '4.2': '2.2.5',
-            '4.3': '2.3.15', '4.4': '2.3.15',
-            '4.5': '3.3.0',  '4.6': '3.6.0',
-            '4.7': '3.6.0',  '4.8': '3.6.0',
-        };
-
-        function toggleCustomMunitVersion() {
-            const selector = document.getElementById('targetMunitSeries');
-            const container = document.getElementById('customMunitContainer');
-            if (!selector || !container) return;
-            const isCustom = selector.value === 'custom';
-            if (isCustom) {
-                container.classList.remove('hidden');
-            } else {
-                container.classList.add('hidden');
-                const input = document.getElementById('customMunitVersion');
-                if (input) input.value = '';
-            }
-        }
-
-        function updateMunitVersionHint() {
-            const hint = document.getElementById('munitVersionHint');
-            if (!hint) return;
-            const munitSel = document.getElementById('targetMunitSeries');
-            const muleSel  = document.getElementById('targetMuleRuntime');
-            const selected = munitSel && munitSel.value;
-            const muleVer  = muleSel  && muleSel.value;
-
-            // Auto mode: show what we'd recommend from the Mule runtime
-            if (!selected || selected === 'custom') {
-                if (muleVer && MULE_MUNIT_COMPAT[muleVer]) {
-                    hint.textContent = `Auto will use MUnit ${MULE_MUNIT_COMPAT[muleVer]} for Mule ${muleVer}.`;
-                    hint.classList.remove('hidden');
-                } else {
-                    hint.classList.add('hidden');
-                }
-                return;
-            }
-
-            // Warn if user picks MUnit 3.x for a Mule < 4.5 runtime
-            const isMunit3 = selected.startsWith('3');
-            const muleMinor = muleVer ? parseFloat(muleVer) : null;
-            if (isMunit3 && muleMinor && muleMinor < 4.5) {
-                hint.textContent = `⚠ MUnit 3.x is NOT compatible with Mule ${muleVer}. Use MUnit 2.3.15 for Mule 4.3–4.4.`;
-                hint.className = 'mt-2 text-xs text-red-700 bg-red-50 border border-red-300 rounded p-2';
-                hint.classList.remove('hidden');
-            } else if (!isMunit3 && muleMinor && muleMinor >= 4.5) {
-                hint.textContent = `ℹ MUnit 2.x works on Mule ${muleVer} but MUnit 3.x is recommended for better features.`;
-                hint.className = 'mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-300 rounded p-2';
-                hint.classList.remove('hidden');
-            } else {
-                hint.classList.add('hidden');
-                hint.className = 'mt-2 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded p-2 hidden';
-            }
-        }
-
-        // ── Connector sample helpers ──────────────────────────────────────────
-        function renderConnectorSamples() {
-            saveConnectorSampleDrafts();
-            const container = document.getElementById('connectorSamplesContainer');
-            const hint = document.getElementById('connectorSamplesHint');
-            if (!container || !hint) return;
-
-            const flow = getSelectedFlowDetails();
-            const connectors = flow?.mock_connectors || [];
-            if (!flow) {
-                container.classList.add('hidden');
-                hint.classList.remove('hidden');
-                hint.textContent = 'Select a flow above to see the connectors that need mock samples.';
-                container.innerHTML = '';
-                return;
-            }
-            if (!connectors.length) {
-                container.classList.add('hidden');
-                hint.classList.remove('hidden');
-                hint.textContent = 'No outbound connectors requiring mock samples were detected for this flow.';
-                container.innerHTML = '';
-                return;
-            }
-
-            hint.classList.add('hidden');
-            container.classList.remove('hidden');
-            container.innerHTML = connectors.map(connector => {
-                const saved = connectorSampleValues[connector.id] || {};
-                return `
-                    <div class="border border-gray-200 rounded-lg bg-gray-50 p-4" data-connector-sample="${escapeHtml(connector.id)}">
-                        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-3">
-                            <div>
-                                <div class="font-medium text-gray-900">${escapeHtml(connector.display_name || connector.doc_name)}</div>
-                                <div class="text-xs text-gray-500">
-                                    Flow: ${escapeHtml(connector.flow)} · Match: ${escapeHtml(connector.match_attribute)} = ${escapeHtml(connector.match_value)}
-                                </div>
-                            </div>
-                            <span class="text-xs text-gray-600 bg-white border border-gray-200 rounded px-2 py-1">${escapeHtml(connector.media_type || 'application/json')}</span>
-                        </div>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <div>
-                                <label class="block text-xs font-medium text-gray-700 mb-1">Sample input sent to this connector</label>
-                                <textarea data-sample-field="request" rows="6"
-                                    class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 font-mono text-sm"
-                                    placeholder='{"id": "12345"}'>${escapeHtml(saved.request || '')}</textarea>
-                            </div>
-                            <div>
-                                <label class="block text-xs font-medium text-gray-700 mb-1">Sample output returned by this connector</label>
-                                <textarea data-sample-field="response" rows="6"
-                                    class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 font-mono text-sm"
-                                    placeholder='{"status": 200, "name": "mike"}'>${escapeHtml(saved.response || '')}</textarea>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }).join('');
-            container.querySelectorAll('textarea[data-sample-field]').forEach(input => {
-                input.addEventListener('input', () => {
-                    saveConnectorSampleDrafts();
-                    renderGenerationReview();
-                });
-            });
-        }
-
-        function getSelectedFlowDetails() {
-            if (!analyzedFlowSelection) return null;
-            const selected = getSelectedFlows()[0];
-            const flows = (analyzedFlowSelection.recommended_flows || []).concat(analyzedFlowSelection.all_flows || []);
-            return flows.find(flow => flow.name === selected) || null;
-        }
-
-        function saveConnectorSampleDrafts() {
-            document.querySelectorAll('[data-connector-sample]').forEach(card => {
-                const id = card.getAttribute('data-connector-sample');
-                if (!id) return;
-                connectorSampleValues[id] = connectorSampleValues[id] || {};
-                card.querySelectorAll('[data-sample-field]').forEach(input => {
-                    connectorSampleValues[id][input.getAttribute('data-sample-field')] = input.value;
-                });
-            });
-        }
-
-        function collectConnectorSamples() {
-            saveConnectorSampleDrafts();
-            const samples = [];
-            const flows = (analyzedFlowSelection?.recommended_flows || []).concat(analyzedFlowSelection?.all_flows || []);
-            const connectorById = {};
-            flows.forEach(flow => (flow.mock_connectors || []).forEach(connector => {
-                connectorById[connector.id] = connector;
-            }));
-            Object.entries(connectorSampleValues).forEach(([id, value]) => {
-                const connector = connectorById[id];
-                if (!connector) return;
-                const request = (value.request || '').trim();
-                const response = (value.response || '').trim();
-                if (!request && !response) return;
-                samples.push({
-                    id,
-                    flow: connector.flow,
-                    processor: connector.processor,
-                    doc_name: connector.doc_name,
-                    media_type: connector.media_type,
-                    request,
-                    response
-                });
-            });
-            return samples;
-        }
-
-        function renderGenerationReview() {
-            const review = document.getElementById('generationReview');
-            const hint = document.getElementById('generationReviewHint');
-            if (!review || !hint) return;
-            const flow = getSelectedFlowDetails();
-            if (!flow) {
-                review.classList.add('hidden');
-                hint.classList.remove('hidden');
-                return;
-            }
-
-            saveConnectorSampleDrafts();
-            const connectors = flow.mock_connectors || [];
-            const missingSamples = connectors.filter(connector => {
-                const value = connectorSampleValues[connector.id] || {};
-                return !(value.response || '').trim();
-            });
-            const scenarios = flow.planned_scenarios || [];
-            const scenarioRows = scenarios.length
-                ? scenarios.map(item => `
-                    <tr class="border-t border-gray-200">
-                        <td class="py-2 pr-3 font-medium text-gray-800">${escapeHtml(item.type || item.name || 'scenario')}</td>
-                        <td class="py-2 pr-3 text-gray-700">${escapeHtml(item.description || '')}</td>
-                        <td class="py-2 text-gray-600">${escapeHtml(item.assertion_strategy || '')}${item.expected_error_type ? ` · ${escapeHtml(item.expected_error_type)}` : ''}</td>
-                    </tr>
-                `).join('')
-                : '<tr><td class="py-2 text-gray-500" colspan="3">No scenario plan available yet.</td></tr>';
-
-            review.innerHTML = `
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                    <div>
-                        <div class="text-xs uppercase tracking-wide text-gray-500">Selected Parent Flow</div>
-                        <div class="font-semibold text-gray-900">${escapeHtml(flow.display_name || flow.name)}</div>
-                        <div class="text-xs text-gray-500 mt-1">${escapeHtml(flow.source_file || 'unknown.xml')}</div>
-                    </div>
-                    <div>
-                        <div class="text-xs uppercase tracking-wide text-gray-500">Assertion Strategy</div>
-                        <div class="font-semibold text-gray-900">${escapeHtml(flow.assertion_strategy || 'Payload equality')}</div>
-                        <div class="text-xs text-gray-500 mt-1">${escapeHtml((flow.error_handlers || []).length ? `Error handlers: ${flow.error_handlers.join(', ')}` : 'No explicit error handler detected')}</div>
-                    </div>
-                </div>
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
-                    <div class="bg-white border border-gray-200 rounded p-3">
-                        <div class="text-xs text-gray-500">Connectors to mock</div>
-                        <div class="text-xl font-semibold text-gray-900">${connectors.length}</div>
-                    </div>
-                    <div class="bg-white border border-gray-200 rounded p-3">
-                        <div class="text-xs text-gray-500">Missing sample responses</div>
-                        <div class="text-xl font-semibold ${missingSamples.length ? 'text-amber-700' : 'text-green-700'}">${missingSamples.length}</div>
-                    </div>
-                    <div class="bg-white border border-gray-200 rounded p-3">
-                        <div class="text-xs text-gray-500">Planned scenarios</div>
-                        <div class="text-xl font-semibold text-gray-900">${scenarios.length}</div>
-                    </div>
-                </div>
-                ${missingSamples.length ? `
-                    <div class="mb-4 bg-amber-50 border border-amber-200 rounded p-3 text-sm text-amber-800">
-                        Missing sample output for: ${missingSamples.map(item => escapeHtml(item.display_name || item.doc_name)).join(', ')}. The backend will infer these mock files.
-                    </div>
-                ` : ''}
-                <div class="overflow-x-auto bg-white border border-gray-200 rounded">
-                    <table class="w-full text-sm">
-                        <thead>
-                            <tr class="text-left text-xs uppercase text-gray-500">
-                                <th class="py-2 pr-3 pl-3">Scenario</th>
-                                <th class="py-2 pr-3">Why</th>
-                                <th class="py-2 pr-3">Validation</th>
-                            </tr>
-                        </thead>
-                        <tbody>${scenarioRows}</tbody>
-                    </table>
-                </div>
-            `;
-            review.classList.remove('hidden');
-            hint.classList.add('hidden');
-        }
-
-        // ── POM dependency banner ─────────────────────────────────────────────
-        // Shows BEFORE the generate button. If critical deps are missing the
-        // banner displays copy-ready POM snippets and disables the button.
-        function renderPomBanner(buildValidation) {
-            const banner = document.getElementById('pomBanner');
-            if (!banner) return;
-            if (!buildValidation || !buildValidation.has_pom) {
-                banner.classList.remove('hidden');
-                banner.innerHTML = `
-                    <div class="bg-amber-50 border border-amber-300 rounded-lg p-4">
-                        <div class="flex items-start">
-                            <svg class="h-5 w-5 text-amber-500 mt-0.5 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
-                            </svg>
-                            <div>
-                                <p class="font-semibold text-amber-800">pom.xml not detected</p>
-                                <p class="text-sm text-amber-700 mt-1">
-                                    Upload a full Mule project ZIP to enable MUnit dependency checking.
-                                    Without a pom.xml the generated tests may not compile.
-                                </p>
-                            </div>
-                        </div>
-                    </div>`;
-                return;
-            }
-
-            const missing = [...(buildValidation.missing_dependencies || []), ...(buildValidation.missing_plugins || [])];
-            const snippets = buildValidation.recommended_snippets || [];
-            const isReady = buildValidation.status === 'ready';
-            const munitVersion = buildValidation.recommended_munit_version || buildValidation.munit_version || '3.6.0';
-            const pluginVersion = buildValidation.munit_plugin_version || buildValidation.recommended_munit_version || munitVersion;
-            const lookupOk = buildValidation.latest_lookup_status === 'resolved';
-
-            if (isReady) {
-                banner.classList.remove('hidden');
-                banner.innerHTML = `
-                    <div class="bg-green-50 border border-green-300 rounded-lg p-4 flex items-center">
-                        <svg class="h-5 w-5 text-green-500 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
-                        </svg>
-                        <div>
-                            <span class="font-semibold text-green-800">pom.xml ready</span>
-                            <span class="text-sm text-green-700 ml-2">
-                                munit-runner ✓ &nbsp; munit-tools ✓ &nbsp; munit-maven-plugin ✓
-                                ${buildValidation.mule_runtime_version ? `&nbsp;|&nbsp; Mule <strong>${escapeHtml(buildValidation.mule_runtime_version)}</strong>` : ''}
-                                &nbsp;|&nbsp; Recommended MUnit <strong>${escapeHtml(munitVersion)}</strong>, plugin <strong>${escapeHtml(pluginVersion)}</strong>
-                            </span>
-                        </div>
-                    </div>`;
-                return;
-            }
-
-            // Missing deps — show blocking warning with copy-ready snippets
-            const snippetHtml = snippets.map(s => `
-                <div class="mt-3">
-                    <p class="text-sm font-semibold text-red-800 mb-1">${escapeHtml(s.title)}</p>
-                    <div class="relative">
-                        <pre class="bg-gray-900 text-green-300 text-xs p-3 rounded overflow-x-auto">${escapeHtml(s.xml)}</pre>
-                        <button onclick="copySnippet(this)" data-snippet="${escapeHtml(s.xml)}"
-                            class="absolute top-2 right-2 bg-gray-700 hover:bg-gray-600 text-white text-xs px-2 py-1 rounded">
-                            Copy
-                        </button>
-                    </div>
-                </div>`).join('');
-
-            banner.classList.remove('hidden');
-            banner.innerHTML = `
-                <div class="bg-red-50 border-2 border-red-400 rounded-lg p-4">
-                    <div class="flex items-start mb-3">
-                        <svg class="h-6 w-6 text-red-500 mt-0.5 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
-                        </svg>
-                        <div>
-                            <p class="font-bold text-red-800 text-base">MUnit dependencies missing in pom.xml</p>
-                            <p class="text-sm text-red-700 mt-1">
-                                The generated MUnit files will <strong>not compile or run</strong> until these are added.
-                                Copy the snippets below into your <code>pom.xml</code> before running
-                                <code>mvn test</code>.
-                            </p>
-                        </div>
-                    </div>
-                    <div class="grid grid-cols-3 gap-3 text-sm mb-3">
-                        <div class="flex items-center gap-1">
-                            ${buildValidation.munit_runner_dependency_present
-                                ? '<span class="text-green-700">✓</span> munit-runner'
-                                : '<span class="text-red-600 font-bold">✗</span> munit-runner <span class="text-red-600 text-xs">(MISSING)</span>'}
-                        </div>
-                        <div class="flex items-center gap-1">
-                            ${buildValidation.munit_tools_dependency_present
-                                ? '<span class="text-green-700">✓</span> munit-tools'
-                                : '<span class="text-red-600 font-bold">✗</span> munit-tools <span class="text-red-600 text-xs">(MISSING)</span>'}
-                        </div>
-                        <div class="flex items-center gap-1">
-                            ${buildValidation.munit_plugin_present
-                                ? '<span class="text-green-700">✓</span> munit-maven-plugin'
-                                : '<span class="text-red-600 font-bold">✗</span> munit-maven-plugin <span class="text-red-600 text-xs">(MISSING)</span>'}
-                        </div>
-                    </div>
-                    <p class="text-xs text-gray-600 mb-2">Recommended for this project: MUnit <strong>${escapeHtml(munitVersion)}</strong>, plugin <strong>${escapeHtml(pluginVersion)}</strong>${buildValidation.mule_runtime_version ? ` (Mule runtime ${escapeHtml(buildValidation.mule_runtime_version)})` : ''}</p>
-                    ${snippetHtml}
-                    <p class="text-xs text-red-700 mt-3 font-semibold">
-                        ⚠ You can still generate the MUnit file, but add these to pom.xml first or the tests will not compile.
-                    </p>
-                </div>`;
-        }
-
-        function copySnippet(btn) {
-            const text = btn.getAttribute('data-snippet');
-            navigator.clipboard.writeText(text).then(() => {
-                const orig = btn.textContent;
-                btn.textContent = 'Copied!';
-                btn.classList.add('bg-green-600');
-                setTimeout(() => { btn.textContent = orig; btn.classList.remove('bg-green-600'); }, 1500);
-            });
-        }
-
-        function escapeHtml(value) {
-            return String(value ?? '')
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;')
-                .replace(/'/g, '&#39;');
-        }
-
-        // MUnit generation
-        async function generateEnhancedMUnit() {
-            try {
-                if (!validateEnhancedInputs()) {
-                    return;
-                }
-
-                // Show progress
-                document.getElementById('progressSection').classList.remove('hidden');
-                document.getElementById('resultsSection').classList.add('hidden');
-
-                const formData = buildGenerationFormData(true);
-
-                // Start generation
-                const response = await axios.post('/api/enhanced/generate', formData, {
-                    headers: {
-                        'Content-Type': 'multipart/form-data'
-                    }
-                });
-
-                if (response.data.success) {
-                    currentJobId = response.data.job_id;
-                    startEnhancedProgressTracking();
-                } else {
-                    showError(response.data.error);
-                }
-
-            } catch (error) {
-                showError('Failed to start enhanced generation: ' + error.message);
-            }
-        }
-
-        // Progress tracking
-        function startEnhancedProgressTracking() {
-            progressInterval = setInterval(async () => {
-                try {
-                    const response = await axios.get(`/api/job-status/${currentJobId}`);
-                    const status = response.data;
-
-                    // Update progress
-                    document.getElementById('progressBar').style.width = `${status.progress}%`;
-                    document.getElementById('progressPercent').textContent = `${status.progress}%`;
-                    document.getElementById('progressMessage').textContent = status.message;
-
-                    // Update generation details
-                    const enhancedDetails = document.getElementById('enhancedProgressDetails');
-                    enhancedDetails.innerHTML = `
-                        <div class="grid grid-cols-2 gap-4">
-                            <div>
-                                <span class="font-medium">Smart Mode:</span> 
-                                <span class="text-purple-600">${document.getElementById('enhancedMode').checked ? 'Active' : 'Disabled'}</span>
-                            </div>
-                            <div>
-                                <span class="font-medium">Optimization:</span> 
-                                <span class="text-blue-600">balanced</span>
-                            </div>
-                        </div>
-                    `;
-
-                    // Check if complete
-                    if (status.status === 'error') {
-                        clearInterval(progressInterval);
-                        showError(status.message);
-                    } else if (status.progress === 100) {
-                        clearInterval(progressInterval);
-                        showEnhancedResults();
-                    }
-                } catch (error) {
-                    clearInterval(progressInterval);
-                    showError('Failed to track progress: ' + error.message);
-                }
-            }, 1000);
-        }
-
-        // Show results
-        async function showEnhancedResults() {
-            try {
-                const response = await axios.get(`/api/job-result/${currentJobId}`);
-                const result = response.data;
-
-                document.getElementById('progressSection').classList.add('hidden');
-                document.getElementById('resultsSection').classList.remove('hidden');
-
-                if (result.success) {
-                    const resultsHTML = `
-                        <div class="space-y-4">
-                            ${result.mode === 'enhanced' ? generateEnhancedResultsHTML(result) : generateLegacyResultsHTML(result)}
-                        </div>
-                    `;
-                    document.getElementById('resultsContent').innerHTML = resultsHTML;
-                } else {
-                    document.getElementById('resultsContent').innerHTML = `
-                        <div class="bg-red-50 p-4 rounded-lg border border-red-200">
-                            <h4 class="font-semibold text-red-800 mb-2">Generation Failed</h4>
-                            <p class="text-red-600">${result.error}</p>
-                        </div>
-                    `;
-                }
-            } catch (error) {
-                showError('Failed to get results: ' + error.message);
-            }
-        }
-
-        function generateEnhancedResultsHTML(result) {
-            const buildValidationHTML = result.build_validation ? generateBuildValidationHTML(result.build_validation) : '';
-            let html = `
-                <div class="bg-gradient-to-r from-purple-50 to-blue-50 p-4 rounded-lg border border-purple-200">
-                    <h4 class="font-semibold text-purple-800 mb-2">MUnit generation completed successfully</h4>
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
-            `;
-            
-            // Basic results
-            html += `
-                <div><strong>Mode:</strong> Smart</div>
-                <div><strong>Generation strategy:</strong> ${result.generation_mode || result.metadata?.generation_mode || 'N/A'}</div>
-                <div><strong>Model / builder:</strong> ${result.metadata?.model_used || 'N/A'}${result.metadata?.template_based ? ' (template fallback)' : ''}</div>
-                <div><strong>Output Files:</strong> ${result.output_files ? result.output_files.length : 1}</div>
-                <div><strong>Generation Time:</strong> ${result.generation_time ? result.generation_time.toFixed(2) : 'N/A'}s</div>
-            `;
-            html += generateSemanticValidationHTML(result);
-            
-            // Token usage
-            if (result.token_usage) {
-                html += `
-                    <div><strong>Token Budget:</strong> ${result.token_usage.budget?.toLocaleString() || 'N/A'}</div>
-                    <div><strong>Tokens Used:</strong> ${result.token_usage.used?.toLocaleString() || 'N/A'}</div>
-                    <div><strong>Usage:</strong> ${result.token_usage.used && result.token_usage.budget ? 
-                        ((result.token_usage.used / result.token_usage.budget) * 100).toFixed(1) : 'N/A'}%</div>
-                `;
-            }
-
-            // Security status
-            if (result.security_validation) {
-                html += `
-                    <div><strong>Security:</strong> <span class="text-green-600">${result.security_validation.status || 'Unknown'}</span></div>
-                    <div><strong>Issues:</strong> ${result.security_validation.issues?.length || 0}</div>
-                `;
-            }
-            
-            // Optimization
-            if (result.optimization_validation) {
-                html += `
-                    <div><strong>Optimization:</strong> <span class="text-blue-600">${result.optimization_validation.status || 'Unknown'}</span></div>
-                    <div><strong>Savings:</strong> ${result.optimization_validation.savings_percentage?.toFixed(1) || 'N/A'}%</div>
-                `;
-            }
-            
-            html += `
-                    </div>
-                </div>
-
-                ${buildValidationHTML}
-                
-                <!-- Generated Files -->
-                ${result.output_files && result.output_files.length > 0 ? generateOutputFilesHTML(result.output_files) : ''}
-                
-                <!-- Download Section -->
-                <div class="flex justify-center space-x-4">
-                    <a href="/api/download/${currentJobId}" class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-6 rounded-lg transition">
-                        Download Test Files
-                    </a>
-                    <button onclick="downloadEnhancedReports()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg transition">
-                        Download Reports
-                    </button>
-                </div>
-            `;
-            
-            return html;
-        }
-
-        function generateSemanticValidationHTML(result) {
-            const sv = result.semantic_validation || result.metadata?.semantic_validation;
-            if (!sv || (!sv.errors?.length && !sv.warnings?.length && sv.valid === undefined)) {
-                return '';
-            }
-            const statusClass = sv.valid === false ? 'text-red-600' : 'text-green-600';
-            let inner = `<div class="mt-3 p-3 bg-white rounded border border-gray-200 text-sm">
-                <div><strong>Semantic validation:</strong> <span class="${statusClass}">${sv.valid === false ? 'Failed' : 'OK'}</span></div>`;
-            if (sv.errors?.length) {
-                inner += `<ul class="list-disc ml-5 mt-1 text-red-700">${sv.errors.map(e => `<li>${e}</li>`).join('')}</ul>`;
-            }
-            if (sv.warnings?.length) {
-                inner += `<ul class="list-disc ml-5 mt-1 text-amber-700">${sv.warnings.map(w => `<li>${w}</li>`).join('')}</ul>`;
-            }
-            inner += '</div>';
-            return inner;
-        }
-
-        function generateLegacyResultsHTML(result) {
-            return `
-                <div class="bg-green-50 p-4 rounded-lg border border-green-200">
-                    <h4 class="font-semibold text-green-800 mb-2">Generation Successful!</h4>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-                        <div><strong>Mode:</strong> Legacy</div>
-                        <div><strong>Generation strategy:</strong> ${result.generation_mode || result.metadata?.generation_mode || 'N/A'}</div>
-                        <div><strong>Model / builder:</strong> ${result.metadata?.model_used || 'N/A'}${result.metadata?.template_based ? ' (template fallback)' : ''}</div>
-                        <div><strong>Output File:</strong> ${result.output_file}</div>
-                        <div><strong>Job Type:</strong> ${result.flow_summary?.job_type || 'N/A'}</div>
-                        <div><strong>Main Flow:</strong> ${result.flow_summary?.flows?.[0] || 'N/A'}</div>
-                        <div><strong>Scenarios:</strong> ${result.scenarios_count || 0}</div>
-                        <div><strong>Generation Time:</strong> ${result.generation_time?.toFixed(2) || 'N/A'}s</div>
-                    </div>
-                    ${generateSemanticValidationHTML(result)}
-                    ${result.build_validation ? generateBuildValidationHTML(result.build_validation) : ''}
-                    <div class="flex justify-center mt-4">
-                        <a href="/api/download/${currentJobId}" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-lg transition">
-                            Download MUnit File
-                        </a>
-                    </div>
-                </div>
-            `;
-        }
-
-        function generateBuildValidationHTML(buildValidation) {
-            const warnings = buildValidation.warnings || [];
-            const snippets = buildValidation.recommended_snippets || [];
-            const ready = buildValidation.status === 'ready';
-            const lookupResolved = buildValidation.latest_lookup_status === 'resolved';
-            return `
-                <div class="${ready ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'} p-4 rounded-lg border mt-4">
-                    <h4 class="font-semibold ${ready ? 'text-green-800' : 'text-amber-800'} mb-2">pom.xml MUnit Readiness</h4>
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm mb-3">
-                        <div><strong>munit-runner:</strong> ${buildValidation.munit_runner_dependency_present ? 'Present' : 'Missing'}</div>
-                        <div><strong>munit-tools:</strong> ${buildValidation.munit_tools_dependency_present ? 'Present' : 'Missing'}</div>
-                        <div><strong>munit-maven-plugin:</strong> ${buildValidation.munit_plugin_present ? 'Present' : 'Missing'}</div>
-                    </div>
-                    <div class="text-sm text-gray-700 mb-3">
-                        <strong>Recommended versions:</strong> MUnit ${escapeHtml(buildValidation.recommended_munit_version || buildValidation.munit_version || '3.6.0')}${buildValidation.mule_runtime_version ? ` for Mule ${escapeHtml(buildValidation.mule_runtime_version)}` : ''}
-                        ${lookupResolved ? `<br><strong>Latest stable lookup:</strong> MUnit ${escapeHtml(buildValidation.latest_munit_version || 'unknown')} and plugin ${escapeHtml(buildValidation.latest_munit_plugin_version || 'unknown')}` : ''}
-                    </div>
-                    ${warnings.length ? `<ul class="list-disc list-inside text-sm text-amber-800 mb-3">${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul>` : '<div class="text-sm text-green-700">Required MUnit dependencies and plugin were detected.</div>'}
-                    ${snippets.map(snippet => `
-                        <div class="mt-3">
-                            <div class="text-sm font-medium text-gray-800 mb-1">${escapeHtml(snippet.title)}</div>
-                            <pre class="bg-gray-900 text-gray-100 text-xs p-3 rounded overflow-x-auto">${escapeHtml(snippet.xml)}</pre>
-                        </div>
-                    `).join('')}
-                </div>
-            `;
-        }
-
-        function generateOutputFilesHTML(outputFiles) {
-            let html = `
-                <div class="bg-white p-4 rounded-lg border">
-                    <h4 class="font-semibold text-gray-800 mb-3">Generated MUnit Files</h4>
-                    <div class="space-y-2 max-h-60 overflow-y-auto">
-            `;
-            
-            outputFiles.forEach(filePath => {
-                const fileName = filePath.split('\\').pop().split('/').pop(); // Extract filename
-                html += `
-                    <div class="bg-gray-50 p-3 rounded border flex items-center justify-between">
-                        <div>
-                            <div class="font-medium text-gray-800">${fileName}</div>
-                            <div class="text-sm text-gray-600">MUnit Test Suite</div>
-                        </div>
-                        <div class="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">
-                            Generated
-                        </div>
-                    </div>
-                `;
-            });
-            
-            html += `
-                    </div>
-                </div>
-            `;
-            
-            return html;
-        }
-
-        function generateTestSuitesHTML(testSuites) {
-            let html = `
-                <div class="bg-white p-4 rounded-lg border">
-                    <h4 class="font-semibold text-gray-800 mb-3">Generated Test Suites</h4>
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            `;
-            
-            for (const [suiteType, suiteData] of Object.entries(testSuites)) {
-                const testCount = suiteData.tests?.length || 0;
-                const features = [];
-                
-                if (suiteData.business_context_applied) features.push('Business Context');
-                if (suiteType.includes('security')) features.push('Security');
-                if (suiteType.includes('fault')) features.push('Fault Tolerance');
-                
-                html += `
-                    <div class="bg-gray-50 p-3 rounded border">
-                        <div class="font-medium text-gray-800">${suiteType.replace('_', ' ').title()}</div>
-                        <div class="text-sm text-gray-600">${testCount} tests</div>
-                        ${features.length > 0 ? `
-                            <div class="text-xs text-purple-600 mt-1">
-                                ${features.join(' • ')}
-                            </div>
-                        ` : ''}
-                    </div>
-                `;
-            }
-            
-            html += `
-                    </div>
-                </div>
-            `;
-            
-            return html;
-        }
-
-        function downloadEnhancedReports() {
-            // Download reports generated by the smart analysis pipeline
-            window.open(`/api/download/${currentJobId}/reports`, '_blank');
-        }
-
-        // Input validation
-        function validateEnhancedInputs() {
-            const xmlSource = document.querySelector('#xml-local.active') ? 'local' : 'github';
-            const usecaseSource = document.querySelector('#usecase-local.active') ? 'local' : 
-                                 document.querySelector('#usecase-confluence.active') ? 'confluence' : 'none';
-
-            // Mule XML is COMPULSORY
-            if (xmlSource === 'local' && document.getElementById('xmlFile').files.length === 0) {
-                showError('Please select at least one Mule XML file (required)');
-                return false;
-            }
-
-            if (xmlSource === 'github') {
-                if (!document.getElementById('githubRepo').value || !document.getElementById('githubFilePath').value) {
-                    showError('Please provide GitHub repository and file path (required)');
-                    return false;
-                }
-            }
-
-            if (flowAnalysisInFlight) {
-                showError('Flow analysis is still in progress. Please wait a moment.');
-                return false;
-            }
-
-            // If flow analysis ran, a flow MUST be selected — but guard against
-            // empty dropdown values caused by race conditions.
-            if (analyzedFlowSelection) {
-                const selected = getSelectedFlows();
-                const allFlows = (analyzedFlowSelection.recommended_flows || []).concat(analyzedFlowSelection.all_flows || []);
-                if (selected.length === 0 && allFlows.length > 0) {
-                    // Auto-select first available flow rather than blocking
-                    const flowSelect = document.getElementById('flowSelect');
-                    if (flowSelect && flowSelect.options.length > 0 && !flowSelect.value) {
-                        flowSelect.value = flowSelect.options[0].value;
-                    }
-                    if (getSelectedFlows().length === 0) {
-                        showError('Please select a flow from the dropdown before generating.');
-                        return false;
-                    }
-                }
-            }
-
-            // Business use case is OPTIONAL
-            if (usecaseSource === 'local' && document.getElementById('usecaseFile').files.length === 0) {
-                return true; // OK to skip use case files
-            }
-
-            if (usecaseSource === 'confluence') {
-                if (!document.getElementById('confluenceUrl').value) {
-                    showError('Please provide Confluence URL or switch to local file');
-                    return false;
-                }
-                if (!document.getElementById('confluenceToken').value || !document.getElementById('confluenceEmail').value) {
-                    showError('Please provide Confluence token and email');
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        // Error handling
-        function showError(message) {
-            clearInterval(progressInterval);
-            document.getElementById('progressSection').classList.add('hidden');
-            
-            const errorDiv = document.createElement('div');
-            errorDiv.className = 'bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-4 fade-in';
-            errorDiv.innerHTML = `
-                <strong>Error:</strong> ${message}
-                <button onclick="this.parentElement.remove()" class="float-right text-red-500 hover:text-red-700">&times;</button>
-            `;
-            
-            const main = document.querySelector('main');
-            main.insertBefore(errorDiv, main.firstChild);
-            
-            setTimeout(() => errorDiv.remove(), 5000);
-        }
-
-        // Initialize
-        document.addEventListener('DOMContentLoaded', function() {
-            // Set initial tab states
-            switchTab('xml', 'local');
-            switchTab('usecase', 'local');
-
-            ['githubRepo', 'githubBranch', 'githubFilePath', 'githubToken'].forEach(id => {
-                const element = document.getElementById(id);
-                if (element) {
-                    element.addEventListener('change', () => {
-                        if (document.querySelector('#xml-github.active')) {
-                            triggerAutoFlowAnalysis();
-                        }
-                    });
-                }
-            });
+<body>
+
+<!-- ── Header ── -->
+<header style="background:var(--pwc-orange)">
+  <div class="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+    <div class="flex items-center gap-4">
+      <!-- PwC wordmark -->
+      <div class="flex items-center gap-1 select-none">
+        <span style="font-size:1.6rem;font-weight:700;color:#fff;letter-spacing:-.02em">Pw</span>
+        <span style="font-size:1.6rem;font-weight:700;color:#fff;letter-spacing:-.02em">C</span>
+      </div>
+      <div style="width:1px;height:2rem;background:rgba(255,255,255,.2)"></div>
+      <div>
+        <p style="color:#fff;font-weight:600;font-size:.95rem;letter-spacing:.01em">MUnit Generator</p>
+        <p style="color:rgba(255,255,255,.5);font-size:.75rem">AI-powered test suite generation for MuleSoft</p>
+      </div>
+    </div>
+    <span class="pill pill-black" style="font-size:.65rem">Beta</span>
+  </div>
+</header>
+
+<!-- ── Orange accent bar ── -->
+<div style="height:3px;background:linear-gradient(90deg,var(--pwc-orange) 0%,var(--pwc-orange-mid) 100%)"></div>
+
+<!-- ── Wizard progress ── -->
+<div style="background:var(--pwc-white);border-bottom:1px solid var(--pwc-gray-light)">
+  <div class="max-w-5xl mx-auto px-6 py-4">
+    <div class="flex items-start" id="wizardSteps"></div>
+  </div>
+</div>
+
+<!-- ── Main ── -->
+<main class="max-w-5xl mx-auto px-6 py-6 space-y-5">
+
+  <!-- STEP 1 -->
+  <section class="card hidden" id="step1" data-step="1">
+    <p class="card-title">Step 1 — Runtime &amp; MUnit Version</p>
+    <p style="color:var(--pwc-gray);font-size:.875rem;margin-bottom:1.5rem">Select your Mule runtime version. Compatible MUnit versions will load automatically.</p>
+    <div class="grid grid-cols-2 gap-5">
+      <div>
+        <label style="display:block;font-size:.8rem;font-weight:600;color:var(--pwc-gray-dark);margin-bottom:.4rem;text-transform:uppercase;letter-spacing:.04em">Mule Runtime</label>
+        <select id="runtimeVersion" onchange="onRuntimeChange()">
+          <option value="">— Select runtime —</option>
+        </select>
+      </div>
+      <div>
+        <label style="display:block;font-size:.8rem;font-weight:600;color:var(--pwc-gray-dark);margin-bottom:.4rem;text-transform:uppercase;letter-spacing:.04em">MUnit Version</label>
+        <select id="munitVersion" disabled>
+          <option value="">— Select runtime first —</option>
+        </select>
+        <p style="font-size:.75rem;color:var(--pwc-gray);margin-top:.3rem" id="munitSeriesHint"></p>
+      </div>
+    </div>
+    <div style="margin-top:1.5rem;display:flex;justify-content:flex-end">
+      <button class="btn-primary" onclick="completeStep(1)" id="step1Btn" disabled>Continue →</button>
+    </div>
+  </section>
+
+  <!-- STEP 2 -->
+  <section class="card hidden" id="step2" data-step="2">
+    <p class="card-title">Step 2 — Upload Mule Application</p>
+    <p style="color:var(--pwc-gray);font-size:.875rem;margin-bottom:1.25rem">Upload your Mule project ZIP. Must include <code style="background:var(--pwc-gray-bg);padding:.1rem .3rem">pom.xml</code> and XML config files.</p>
+    <div class="drop-zone" id="muleDropZone" onclick="document.getElementById('muleZipInput').click()"
+         ondragover="event.preventDefault();this.classList.add('over')"
+         ondragleave="this.classList.remove('over')"
+         ondrop="handleDrop(event,'muleZipInput')">
+      <div style="font-size:2.5rem;margin-bottom:.5rem">📦</div>
+      <p style="font-weight:600;color:var(--pwc-black)">Drop your Mule project ZIP here</p>
+      <p style="font-size:.8rem;color:var(--pwc-gray);margin-top:.25rem">or click to browse — .zip files only</p>
+      <p style="font-size:.75rem;color:var(--pwc-orange);margin-top:.5rem;font-weight:500" id="muleFileLabel">No file selected</p>
+    </div>
+    <input type="file" id="muleZipInput" accept=".zip" class="hidden" onchange="onMuleFileSelect(event)">
+    <div style="margin-top:1.25rem;display:flex;justify-content:space-between">
+      <button class="btn-secondary" onclick="goToStep(1)">← Back</button>
+      <button class="btn-primary" onclick="analyzeFlows()" id="step2Btn" disabled>Analyse Flows →</button>
+    </div>
+  </section>
+
+  <!-- STEP 3 -->
+  <section class="card hidden" id="step3" data-step="3">
+    <p class="card-title">Step 3 — Use-Case Document <span class="pill pill-gray" style="margin-left:.5rem;font-size:.65rem">Optional</span></p>
+    <p style="color:var(--pwc-gray);font-size:.875rem;margin-bottom:1.25rem">Upload a Confluence export, Word doc, or PDF containing test scenarios to guide generation.</p>
+    <div class="drop-zone" onclick="document.getElementById('usecaseInput').click()"
+         ondragover="event.preventDefault();this.classList.add('over')"
+         ondragleave="this.classList.remove('over')"
+         ondrop="handleDrop(event,'usecaseInput')">
+      <div style="font-size:2.5rem;margin-bottom:.5rem">📄</div>
+      <p style="font-weight:600;color:var(--pwc-black)">Drop use-case document here</p>
+      <p style="font-size:.8rem;color:var(--pwc-gray);margin-top:.25rem">PDF, DOCX, TXT, HTML</p>
+      <p style="font-size:.75rem;color:var(--pwc-orange);margin-top:.5rem;font-weight:500" id="docFileLabel">No file selected</p>
+    </div>
+    <input type="file" id="usecaseInput" accept=".pdf,.docx,.doc,.txt,.html,.htm" class="hidden" onchange="onDocFileSelect(event)">
+    <div style="margin-top:1.25rem;display:flex;justify-content:space-between">
+      <button class="btn-secondary" onclick="goToStep(2)">← Back</button>
+      <button class="btn-primary" onclick="goToStep(4)">Continue →</button>
+    </div>
+  </section>
+
+  <!-- STEP 4 -->
+  <section class="card hidden" id="step4" data-step="4">
+    <p class="card-title">Step 4 — POM Validation</p>
+    <div id="pomResult" style="margin-bottom:1rem">
+      <div style="display:flex;align-items:center;gap:.5rem;color:var(--pwc-gray);font-size:.875rem">
+        <svg class="animate-spin" style="width:1.1rem;height:1.1rem" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+        </svg>Checking pom.xml…
+      </div>
+    </div>
+    <div style="display:flex;justify-content:space-between">
+      <button class="btn-secondary" onclick="goToStep(3)">← Back</button>
+      <button class="btn-primary" onclick="goToStep(5)">Continue to Flow Selection →</button>
+    </div>
+  </section>
+
+  <!-- STEP 5 -->
+  <section class="card hidden" id="step5" data-step="5">
+    <p class="card-title">Step 5 — Select Flows to Test</p>
+    <p style="color:var(--pwc-gray);font-size:.875rem;margin-bottom:1rem">Only <strong>parent flows</strong> (with listeners) are shown. Sub-flows and flow-refs are traced automatically.</p>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.75rem">
+      <span style="font-size:.8rem;color:var(--pwc-gray)" id="flowCount">0 flows found</span>
+      <div style="display:flex;gap:.5rem">
+        <button class="btn-ghost" onclick="selectAllFlows()">Select all</button>
+        <button class="btn-ghost" onclick="clearFlowSelection()">Clear</button>
+      </div>
+    </div>
+    <div id="flowList" style="display:flex;flex-direction:column;gap:.375rem;max-height:28rem;overflow-y:auto"></div>
+    <div style="margin-top:1.25rem;display:flex;justify-content:space-between">
+      <button class="btn-secondary" onclick="goToStep(4)">← Back</button>
+      <button class="btn-primary" onclick="goToConnectorSamples()" id="step5Btn" disabled>Next: Provide Mock Data →</button>
+    </div>
+  </section>
+
+  <!-- STEP 6 -->
+  <section class="card hidden" id="step6" data-step="6">
+    <p class="card-title">Step 6 — Connector Mock Data</p>
+    <p style="color:var(--pwc-gray);font-size:.875rem;margin-bottom:.5rem">
+      These connectors were identified in your selected flows. Provide sample <strong>input</strong> (what the connector receives) and <strong>output</strong> (mock response) for realistic test data.
+    </p>
+
+    <!-- Legend -->
+    <div style="display:flex;gap:.75rem;flex-wrap:wrap;margin-bottom:1.25rem;margin-top:.75rem">
+      <div style="display:flex;align-items:center;gap:.4rem;font-size:.78rem;font-weight:600">
+        <span style="width:.75rem;height:.75rem;background:var(--pwc-orange);display:inline-block"></span>
+        <span style="color:var(--pwc-gray-dark)">MOCK — returns data used by the flow</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:.4rem;font-size:.78rem;font-weight:600">
+        <span style="width:.75rem;height:.75rem;background:var(--pwc-warn);display:inline-block"></span>
+        <span style="color:var(--pwc-gray-dark)">SPY — fire-and-forget side effect</span>
+      </div>
+    </div>
+
+    <div id="connectorSampleList" style="display:flex;flex-direction:column;gap:.5rem"></div>
+    <div id="noConnectorsMsg" style="display:none;text-align:center;color:var(--pwc-gray);font-size:.875rem;padding:2rem 0">
+      No external connectors found in the selected flows — no mocks needed.
+    </div>
+
+    <div style="margin-top:1.5rem;display:flex;justify-content:space-between">
+      <button class="btn-secondary" onclick="goToStep(5)">← Back</button>
+      <button class="btn-primary" onclick="goToStep(7)">Generate MUnit →</button>
+    </div>
+  </section>
+
+  <!-- STEP 7 -->
+  <section class="card hidden" id="step7" data-step="7">
+    <p class="card-title">Step 7 — Generate MUnit Tests</p>
+    <p style="color:var(--pwc-gray);font-size:.875rem;margin-bottom:1.5rem">Review the summary below, then click Generate.</p>
+
+    <div class="grid grid-cols-4 gap-4 mb-6" id="genSummary"></div>
+
+    <div style="text-align:center;margin-bottom:1.5rem">
+      <button class="btn-primary" style="font-size:1rem;padding:.875rem 2.5rem;letter-spacing:.02em" onclick="generateMUnit()" id="genBtn">
+        Generate MUnit Tests →
+      </button>
+    </div>
+
+    <div class="hidden" id="genProgressWrap" style="margin-bottom:1.5rem">
+      <div class="progress-track">
+        <div id="genProgress" style="width:0%"></div>
+      </div>
+      <p style="font-size:.8rem;text-align:center;color:var(--pwc-gray);margin-top:.5rem" id="genStatusMsg">Starting…</p>
+    </div>
+
+    <div class="hidden" id="genResults"></div>
+
+    <div style="margin-top:1rem">
+      <button class="btn-secondary" onclick="goToStep(6)">← Back</button>
+    </div>
+  </section>
+
+</main>
+
+<!-- ── Flow data modal ── -->
+<div class="modal-overlay hidden" id="flowDataModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div>
+        <p style="font-weight:700;font-size:1rem;color:var(--pwc-black)">Additional Test Data Required</p>
+        <p style="font-size:.75rem;color:var(--pwc-gray);margin-top:.15rem" id="modalFlowName">Flow: —</p>
+      </div>
+      <button class="btn-primary" style="font-size:.8rem;padding:.45rem 1rem" onclick="submitFlowData()">Submit &amp; Generate →</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:.8rem;color:var(--pwc-gray);margin-bottom:1rem">
+        Provide the test data for this flow. These values will populate <code>munit:behavior / set-event</code> blocks.
+      </p>
+      <div id="dynamicFlowTargetsWrap" class="hidden" style="padding:.75rem 1rem;background:var(--pwc-gray-bg);border-left:3px solid var(--pwc-orange);margin-bottom:1rem">
+        <label style="display:block;font-size:.78rem;font-weight:600;color:var(--pwc-gray-dark);margin-bottom:.4rem;text-transform:uppercase;letter-spacing:.04em">Dynamic Flow Targets</label>
+        <textarea id="dynamicFlowTargets" class="sample-input" rows="4" placeholder='flowA, flowB'></textarea>
+        <p style="font-size:.72rem;color:var(--pwc-gray);margin-top:.3rem">Enter concrete flow names, comma/newline separated, or JSON like [{"condition":"otherwise","targetFlow":"flowA"}].</p>
+      </div>
+      <div class="tab-bar mb-4" id="modalTabs">
+        <button class="tab-btn active" onclick="switchModalTab('payload')">Request Payload</button>
+        <button class="tab-btn" onclick="switchModalTab('queryParams')">Query Params</button>
+        <button class="tab-btn" onclick="switchModalTab('uriParams')">URI Params</button>
+        <button class="tab-btn" onclick="switchModalTab('headers')">Headers</button>
+        <button class="tab-btn" onclick="switchModalTab('expectedResponse')">Expected Response</button>
+      </div>
+      <div id="tab-payload">
+        <label style="display:block;font-size:.78rem;font-weight:600;color:var(--pwc-gray-dark);margin-bottom:.4rem;text-transform:uppercase;letter-spacing:.04em">Request Payload (JSON / XML)</label>
+        <textarea id="flowPayload" class="sample-input" rows="7" placeholder='{ "orderId": "ORD-001", "amount": 150.00 }'></textarea>
+        <p style="font-size:.72rem;color:var(--pwc-gray);margin-top:.3rem">The actual request body this flow receives at runtime.</p>
+      </div>
+      <div id="tab-queryParams" class="hidden">
+        <label style="display:block;font-size:.78rem;font-weight:600;color:var(--pwc-gray-dark);margin-bottom:.6rem;text-transform:uppercase;letter-spacing:.04em">Query Parameters</label>
+        <div id="queryParamsRows"></div>
+        <button class="btn-ghost mt-2" style="font-size:.75rem" onclick="addKvRow('queryParamsRows','qp')">+ Add parameter</button>
+      </div>
+      <div id="tab-uriParams" class="hidden">
+        <label style="display:block;font-size:.78rem;font-weight:600;color:var(--pwc-gray-dark);margin-bottom:.6rem;text-transform:uppercase;letter-spacing:.04em">URI Parameters</label>
+        <div id="uriParamsRows"></div>
+        <button class="btn-ghost mt-2" style="font-size:.75rem" onclick="addKvRow('uriParamsRows','up')">+ Add parameter</button>
+      </div>
+      <div id="tab-headers" class="hidden">
+        <label style="display:block;font-size:.78rem;font-weight:600;color:var(--pwc-gray-dark);margin-bottom:.6rem;text-transform:uppercase;letter-spacing:.04em">HTTP Headers</label>
+        <div id="headersRows"></div>
+        <button class="btn-ghost mt-2" style="font-size:.75rem" onclick="addKvRow('headersRows','hd')">+ Add header</button>
+      </div>
+      <div id="tab-expectedResponse" class="hidden">
+        <label style="display:block;font-size:.78rem;font-weight:600;color:var(--pwc-gray-dark);margin-bottom:.4rem;text-transform:uppercase;letter-spacing:.04em">Expected Response</label>
+        <textarea id="flowExpectedResponse" class="sample-input" rows="6" placeholder='{ "status": "success", "orderId": "ORD-001" }'></textarea>
+        <label style="display:block;font-size:.78rem;font-weight:600;color:var(--pwc-gray-dark);margin:.75rem 0 .4rem;text-transform:uppercase;letter-spacing:.04em">HTTP Status Code</label>
+        <input type="text" id="flowStatusCode" value="200" style="width:6rem"/>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast">Message</div>
+
+<script>
+const state = {
+  currentStep: 1,
+  runtimeVersion: '', munitVersion: '',
+  muleZipFile: null, usecaseFile: null,
+  analysisId: null, flows: [],
+  entryPointFlows:  [],
+  apiResourceFlows: [],
+  unreachableFlows: [],
+  selectedFlows: new Set(),
+  buildValidation: {},
+  connectorSamples: {},
+  flowTestData: {},
+  _pendingGenResolve: null,
+};
+
+const STEPS = [
+  {id:1,label:'Versions'},
+  {id:2,label:'Upload'},
+  {id:3,label:'Use Case'},
+  {id:4,label:'POM'},
+  {id:5,label:'Flows'},
+  {id:6,label:'Mock Data'},
+  {id:7,label:'Generate'},
+];
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', async () => {
+  document.getElementById('step1').classList.remove('hidden');
+  renderWizardSteps();
+  await loadVersions();
+  initKvRows();
+
+  // Event delegation for flow cards and checkboxes (avoids inline onclick quoting issues)
+  document.getElementById('flowList').addEventListener('click', function(e) {
+    // Find closest element with data-flowname
+    const target = e.target.closest('[data-flowname]');
+    if (!target) return;
+    // Don't double-fire when checkbox triggers the card click too
+    if (e.target.classList.contains('flow-chk') && e.target !== target) return;
+    e.stopPropagation();
+    const name = target.getAttribute('data-flowname');
+    if (name) toggleFlow(name);
+  });
+});
+
+function renderWizardSteps() {
+  const el = document.getElementById('wizardSteps');
+  el.innerHTML = STEPS.map((s, i) => {
+    const done   = state.currentStep > s.id;
+    const active = state.currentStep === s.id;
+    return `
+    <div style="display:flex;flex-direction:column;align-items:center;flex:1">
+      <div style="display:flex;align-items:center;width:100%">
+        ${i > 0 ? `<div class="step-connector ${state.currentStep > i ? 'done' : ''}"></div>` : ''}
+        <div class="step-badge ${done?'done':active?'active':''}">${done ? '✓' : s.id}</div>
+        ${i < STEPS.length-1 ? `<div class="step-connector ${done ? 'done' : ''}"></div>` : ''}
+      </div>
+      <span class="step-label ${active?'active':''}">${s.label}</span>
+    </div>`;
+  }).join('');
+}
+
+function getBadgeClass(id) {
+  return state.currentStep > id ? 'done' : state.currentStep === id ? 'active' : '';
+}
+
+// ─── Versions ────────────────────────────────────────────────────────────────
+async function loadVersions() {
+  try {
+    const res  = await fetch('/api/munit-versions');
+    const data = await res.json();
+    if (!data.success) return;
+    const sel = document.getElementById('runtimeVersion');
+    data.runtime_versions.forEach(v => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = `Mule ${v}`; sel.appendChild(o);
+    });
+  } catch(e) { console.error('Version load failed', e); }
+}
+
+async function onRuntimeChange() {
+  const runtime = document.getElementById('runtimeVersion').value;
+  state.runtimeVersion = runtime;
+  const sel  = document.getElementById('munitVersion');
+  const hint = document.getElementById('munitSeriesHint');
+  const btn  = document.getElementById('step1Btn');
+  if (!runtime) { sel.innerHTML='<option value="">— Select runtime first —</option>'; sel.disabled=true; btn.disabled=true; return; }
+  try {
+    const res  = await fetch(`/api/munit-versions/${runtime}`);
+    const data = await res.json();
+    if (!data.success) return;
+    sel.innerHTML = '';
+    [...data.versions].reverse().forEach(v => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = v+(v===data.recommended?' ★ recommended':'');
+      if (v===data.recommended) o.selected=true;
+      sel.appendChild(o);
+    });
+    sel.disabled = false;
+    state.munitVersion = data.recommended || data.versions.slice(-1)[0];
+    hint.textContent = `MUnit ${data.series} — ${data.series==='2.x'?'compatible with Mule 4.1–4.4':'requires Mule 4.5+'}`;
+    hint.style.color = data.series==='3.x' ? 'var(--pwc-orange)' : 'var(--pwc-gray)';
+    btn.disabled = false;
+  } catch(e) { console.error(e); }
+}
+
+document.addEventListener('change', e => { if (e.target.id==='munitVersion') state.munitVersion=e.target.value; });
+
+// ─── Navigation ───────────────────────────────────────────────────────────────
+function completeStep(n) { state.currentStep = n+1; _showStep(); }
+
+function goToStep(n) {
+  state.currentStep = n; _showStep();
+  if (n===4 && state.analysisId) renderPomResult();
+  if (n===7) renderGenSummary();
+}
+
+function _showStep() {
+  document.querySelectorAll('[data-step]').forEach(el => {
+    el.classList.toggle('hidden', parseInt(el.dataset.step)!==state.currentStep);
+  });
+  renderWizardSteps();
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+// ─── Uploads ──────────────────────────────────────────────────────────────────
+function handleDrop(event, inputId) {
+  event.preventDefault();
+  event.currentTarget.classList.remove('over');
+  const f = event.dataTransfer.files[0];
+  if (!f) return;
+  if (inputId==='muleZipInput') handleMuleFile(f); else handleDocFile(f);
+}
+function onMuleFileSelect(e) { if (e.target.files[0]) handleMuleFile(e.target.files[0]); }
+function onDocFileSelect(e)  { if (e.target.files[0]) handleDocFile(e.target.files[0]); }
+function handleMuleFile(file) {
+  if (!file.name.toLowerCase().endsWith('.zip')) { showToast('Please upload a .zip file','error'); return; }
+  state.muleZipFile = file;
+  document.getElementById('muleFileLabel').textContent = `✓ ${file.name} (${fmtBytes(file.size)})`;
+  document.getElementById('step2Btn').disabled = false;
+}
+function handleDocFile(file) {
+  state.usecaseFile = file;
+  document.getElementById('docFileLabel').textContent = `✓ ${file.name} (${fmtBytes(file.size)})`;
+}
+
+// ─── Analyze ──────────────────────────────────────────────────────────────────
+async function analyzeFlows() {
+  const btn = document.getElementById('step2Btn');
+  btn.disabled=true; btn.textContent='Analysing…';
+  const fd = new FormData();
+  fd.append('xml_file', state.muleZipFile);
+  fd.append('xml_source','folder');
+  try {
+    const res  = await fetch('/api/enhanced/analyze-flows',{method:'POST',body:fd});
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error||'Analysis failed');
+    state.analysisId      = data.analysis_id;
+    state.buildValidation = data.build_validation||{};
+
+    // Three-category flow grouping from the API
+    const sel = data.selection || {};
+    state.entryPointFlows  = (sel.entry_point_flows  || sel.parent_flows || []);
+    state.apiResourceFlows = (sel.api_resource_flows || []);
+    state.unreachableFlows = (sel.unreachable_flows  || []);
+
+    // Pre-select entry_point and api_resource flows (both need MUnit)
+    state.entryPointFlows.forEach(f  => state.selectedFlows.add(f.name));
+    state.apiResourceFlows.forEach(f => state.selectedFlows.add(f.name));
+
+    renderFlows();
+    completeStep(2);
+  } catch(e) { showToast(`Analysis failed: ${e.message}`,'error'); }
+  finally { btn.disabled=false; btn.textContent='Analyse Flows →'; }
+}
+
+// ─── Flow list ────────────────────────────────────────────────────────────────
+// ─── Flow rendering (three categories) ────────────────────────────────────────
+function renderFlows() {
+  const list = document.getElementById('flowList');
+  const ep   = state.entryPointFlows  || [];
+  const ar   = state.apiResourceFlows || [];
+  const ur   = state.unreachableFlows || [];
+  const total = ep.length + ar.length;
+
+  document.getElementById('flowCount').textContent =
+    `${ep.length} entry-point flow${ep.length!==1?'s':''}, ` +
+    `${ar.length} API resource flow${ar.length!==1?'s':''}`+
+    (ur.length ? `, ${ur.length} unreachable` : '');
+
+  if (!total && !ur.length) {
+    list.innerHTML='<p style="color:var(--pwc-gray);text-align:center;padding:2rem 0;font-size:.875rem">No flows found in this project.</p>';
+    return;
+  }
+
+  let html = '';
+
+  // ── Group 1: Entry-point flows ─────────────────────────────────────────────
+  if (ep.length) {
+    html += _groupHeader(
+      'Entry-Point Flows',
+      'Have a listener (HTTP, Scheduler, JMS, MQ…). Each needs its own MUnit suite.',
+      '#D04A02', ep.length
+    );
+    html += ep.map(f => _flowCard(f, 'entry_point')).join('');
+  }
+
+  // ── Group 2: APIKit resource flows ─────────────────────────────────────────
+  if (ar.length) {
+    html += _groupHeader(
+      'API Resource Flows',
+      'APIKit-routed endpoints. No listener of their own, but each endpoint needs isolated tests.',
+      '#1a56db', ar.length
+    );
+    html += ar.map(f => _flowCard(f, 'api_resource')).join('');
+  }
+
+  // ── Group 3: Unreachable flows ─────────────────────────────────────────────
+  if (ur.length) {
+    html += _groupHeader(
+      'Unreachable Flows',
+      'No listener and never called by any other flow. Likely dead code — review before generating tests.',
+      '#6b7280', ur.length
+    );
+    html += ur.map(f => _flowCard(f, 'unreachable')).join('');
+  }
+
+  list.innerHTML = html;
+  updateStep5Btn();
+}
+
+function _groupHeader(title, subtitle, color, count) {
+  return `
+  <div style="display:flex;align-items:center;gap:.75rem;margin-top:1rem;margin-bottom:.4rem;padding:.5rem .75rem;
+              background:var(--pwc-gray-bg);border-left:3px solid ${color}">
+    <div style="flex:1">
+      <span style="font-weight:700;font-size:.8rem;color:var(--pwc-black);text-transform:uppercase;letter-spacing:.05em">${title}</span>
+      <span style="font-size:.72rem;color:var(--pwc-gray);margin-left:.5rem">${subtitle}</span>
+    </div>
+    <span style="font-size:.75rem;font-weight:700;color:${color}">${count}</span>
+  </div>`;
+}
+
+function _flowCard(f, category) {
+  const checked       = state.selectedFlows.has(f.name);
+  const mocks         = (f.connectors_to_mock || (f.mock_connectors||[]).filter(c=>c.action==='mock-when').map(c=>c.processor)).slice(0,4);
+  const spies         = (f.connectors_to_spy  || (f.mock_connectors||[]).filter(c=>c.action==='spy').map(c=>c.processor)).slice(0,3);
+  const deps          = (f.referenced_flows||[]).length + (f.dw_lookup_refs||[]).length + (f.child_flows||[]).length;
+  const trigger       = f.trigger || f.trigger_type || '';
+  const isUnreachable = category === 'unreachable';
+  const borderColor   = category === 'entry_point' ? 'var(--pwc-orange)' : category === 'api_resource' ? '#1a56db' : '#9ca3af';
+  const selClass      = (checked && !isUnreachable) ? 'selected' : '';
+  const borderStyle   = (checked && !isUnreachable) ? borderColor : 'transparent';
+  const opacityStyle  = isUnreachable ? 'opacity:.55' : '';
+  const safeName      = esc(f.name);
+  const safeFile      = f.source_file ? esc(f.source_file.split('/').pop()) : '';
+
+  // Use data-flowname + event delegation — avoids ALL quote-nesting problems
+  const clickable     = isUnreachable ? '' : 'data-flowname="' + safeName + '"';
+
+  let chips = '';
+  mocks.forEach(c => { chips += '<span class="pill chip-mock">' + esc(c) + '</span>'; });
+  spies.forEach(c => { chips += '<span class="pill chip-spy">'  + esc(c) + '</span>'; });
+  if (deps > 0) chips += '<span class="pill pill-gray">+' + deps + ' sub-flow' + (deps>1?'s':'') + '</span>';
+
+  return '<div class="flow-card ' + selClass + '" id="fc-' + safeName + '" ' + clickable +
+         ' style="' + opacityStyle + ';border-left-color:' + borderStyle + '">' +
+    '<div style="display:flex;align-items:flex-start;gap:.75rem">' +
+      '<input type="checkbox" class="flow-chk" style="margin-top:.2rem;accent-color:var(--pwc-orange);width:1rem;height:1rem;flex-shrink:0"' +
+             ' id="chk-' + safeName + '" ' + ((checked&&!isUnreachable)?'checked':'') + ' ' + (isUnreachable?'disabled':'') +
+             ' data-flowname="' + safeName + '">' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin-bottom:.3rem">' +
+          '<span style="font-weight:600;font-size:.875rem;color:var(--pwc-black)">' + safeName + '</span>' +
+          (trigger ? '<span class="pill pill-blue">' + esc(trigger) + '</span>' : '') +
+          (isUnreachable ? '<span class="pill pill-gray">⚠ Unreachable</span>' : '') +
+          (safeFile ? '<span style="font-size:.7rem;color:var(--pwc-gray)">' + safeFile + '</span>' : '') +
+        '</div>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:.3rem">' + chips + '</div>' +
+        (isUnreachable ? '<p style="font-size:.72rem;color:var(--pwc-gray);margin-top:.3rem">Not reachable from any entry point — low test value.</p>' : '') +
+      '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+function toggleFlow(name) {
+  const chk  = document.getElementById(`chk-${name}`);
+  const card = document.getElementById(`fc-${name}`);
+  const all  = [...(state.entryPointFlows||[]), ...(state.apiResourceFlows||[])];
+  const f    = all.find(x=>x.name===name);
+  if (!f) return;
+  const cat = f.flow_category || 'entry_point';
+  const borderColor = cat==='api_resource' ? '#1a56db' : 'var(--pwc-orange)';
+
+  if (state.selectedFlows.has(name)) {
+    state.selectedFlows.delete(name);
+    card.classList.remove('selected');
+    card.style.borderLeftColor = 'transparent';
+    if (chk) chk.checked = false;
+  } else {
+    state.selectedFlows.add(name);
+    card.classList.add('selected');
+    card.style.borderLeftColor = borderColor;
+    if (chk) chk.checked = true;
+  }
+  updateStep5Btn();
+}
+
+function selectAllFlows() {
+  [...(state.entryPointFlows||[]), ...(state.apiResourceFlows||[])].forEach(f => {
+    state.selectedFlows.add(f.name);
+    const chk=document.getElementById(`chk-${f.name}`); if(chk) chk.checked=true;
+    const card=document.getElementById(`fc-${f.name}`); if(card) card.classList.add('selected');
+  });
+  updateStep5Btn();
+}
+
+function clearFlowSelection() {
+  state.selectedFlows.clear();
+  [...(state.entryPointFlows||[]), ...(state.apiResourceFlows||[]), ...(state.unreachableFlows||[])].forEach(f=>{
+    const chk=document.getElementById(`chk-${f.name}`); if(chk) chk.checked=false;
+    const card=document.getElementById(`fc-${f.name}`); if(card) card.classList.remove('selected');
+  });
+  updateStep5Btn();
+}
+
+function updateStep5Btn() { document.getElementById('step5Btn').disabled = state.selectedFlows.size===0; }
+
+// ─── Connector samples ────────────────────────────────────────────────────────
+function goToConnectorSamples() {
+  const connectors = [];
+  const seen = new Set();
+  const selected = [...(state.entryPointFlows||[]),
+                    ...(state.apiResourceFlows||[])]
+                   .filter(f => state.selectedFlows.has(f.name));
+
+  selected.forEach(flow => {
+    // Prefer mock_connectors from API (includes deep traversal A→B→C→D→E/F)
+    const apiConnectors = flow.mock_connectors || [];
+
+    if (apiConnectors.length) {
+      apiConnectors.forEach(c => {
+        const key = (c.id || c.processor + '::' + (c.source_flow||flow.name));
+        if (seen.has(key)) return;
+        seen.add(key);
+        connectors.push({
+          ...c,
+          flowName:    flow.name,
+          source_flow: c.source_flow || c.flow || flow.name,
+          decision:    c.action === 'mock-when' ? 'mock' : 'spy',
+          depth:       c.depth || 0,
         });
-    </script>
+      });
+    } else {
+      // Fallback: build from connectors_to_mock/spy on the flow itself
+      const mocks = flow.connectors_to_mock || [];
+      const spies = flow.connectors_to_spy  || [];
+      mocks.forEach(c => {
+        const key = c + '::' + flow.name;
+        if (seen.has(key)) return;
+        seen.add(key);
+        connectors.push({type:c, processor:c, flowName:flow.name, source_flow:flow.name,
+                         decision:'mock', depth:0, display_name:c,
+                         detail: findProcDetail(flow, c)});
+      });
+      spies.forEach(c => {
+        const key = c + '::' + flow.name;
+        if (seen.has(key)) return;
+        seen.add(key);
+        connectors.push({type:c, processor:c, flowName:flow.name, source_flow:flow.name,
+                         decision:'spy', depth:0, display_name:c,
+                         detail: findProcDetail(flow, c)});
+      });
+    }
+  });
+
+  renderConnectorSamples(connectors);
+  goToStep(6);
+}
+
+function findProcDetail(flow, connectorType) {
+  const chain = flow.processor_chain||[];
+  for (const p of chain) {
+    if ((p.type||'').includes(connectorType.split(':')[0]))
+      return { configRef:p.config||p.config_ref||'', path:p.path||p.url||'', method:p.method||'', operation:p.operation||p.type||connectorType };
+  }
+  return { operation:connectorType };
+}
+
+function renderConnectorSamples(connectors) {
+  const list  = document.getElementById('connectorSampleList');
+  const noMsg = document.getElementById('noConnectorsMsg');
+  if (!connectors.length) { list.innerHTML=''; noMsg.style.display='block'; return; }
+  noMsg.style.display='none';
+
+  // Group by source flow
+  const byFlow = {};
+  connectors.forEach((c, i) => {
+    const fk = c.source_flow || c.flowName || 'Flow';
+    if (!byFlow[fk]) byFlow[fk] = [];
+    byFlow[fk].push({...c, _idx: i});
+  });
+
+  const flowKeys = Object.keys(byFlow);
+  let html = '';
+
+  if (flowKeys.length > 1) {
+    html += '<div style="padding:.6rem .875rem;background:var(--pwc-gray-bg);border-left:3px solid var(--pwc-orange);margin-bottom:.75rem;font-size:.78rem;color:var(--pwc-gray-dark)"><strong>Call chain traced:</strong> '
+          + flowKeys.map(f => '<code>' + esc(f) + '</code>').join(' → ') + '</div>';
+  }
+
+  flowKeys.forEach(flowName => {
+    if (flowKeys.length > 1) {
+      html += '<div style="display:flex;align-items:center;gap:.5rem;margin:.75rem 0 .3rem">'
+            + '<span style="font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--pwc-gray)">Connectors in</span>'
+            + '<span style="font-weight:700;font-size:.8rem;color:var(--pwc-black)">' + esc(flowName) + '</span>'
+            + '</div>';
+    }
+
+    byFlow[flowName].forEach(c => {
+      const key    = ('cs_' + (c.id || c.processor + '_' + c._idx)).replace(/[^a-z0-9_]/gi,'_');
+      const isMock = c.action === 'mock-when' || c.decision === 'mock';
+      const accent = isMock ? 'var(--pwc-orange)' : 'var(--pwc-warn)';
+      const label  = isMock ? 'MOCK' : 'SPY';
+      const opLine = esc(c.display_name || c.doc_name || c.processor || c.type || '');
+
+      html += '<div class="connector-card">'
+            +   '<div class="connector-card-header ' + (isMock?'mock-header':'spy-header') + '" data-toggle="' + key + '">'
+            +     '<span class="pill" style="background:' + (isMock?'var(--pwc-orange-light)':'#fff3e0') + ';color:' + accent + ';min-width:3.5rem;text-align:center">' + label + '</span>'
+            +     '<div style="flex:1;min-width:0"><span style="font-weight:600;font-size:.875rem;color:var(--pwc-black)">' + opLine + '</span></div>'
+            +     '<svg style="width:1rem;height:1rem;color:var(--pwc-gray);flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>'
+            +   '</div>'
+            +   '<div class="connector-card-body open" id="' + key + '">';
+
+      if (isMock) {
+        html += '<div class="grid grid-cols-2 gap-4">'
+              +   '<div>'
+              +     '<label style="display:block;font-size:.72rem;font-weight:700;color:var(--pwc-gray-dark);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.35rem">'
+              +       '&#x1F4E5; Input Sample <span style="font-weight:400;text-transform:none;color:var(--pwc-gray)">&#8212; what connector receives</span>'
+              +     '</label>'
+              +     '<textarea id="inp_' + key + '" class="sample-input" rows="5" placeholder="e.g. SELECT * FROM orders WHERE id = :id" data-cskey="' + key + '" data-csfield="input"></textarea>'
+              +   '</div>'
+              +   '<div>'
+              +     '<label style="display:block;font-size:.72rem;font-weight:700;color:var(--pwc-gray-dark);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.35rem">'
+              +       '&#x1F4E4; Output Sample <span style="font-weight:400;text-transform:none;color:var(--pwc-gray)">&#8212; mock return value</span>'
+              +     '</label>'
+              +     '<textarea id="out_' + key + '" class="sample-input" rows="5" placeholder="[{&quot;id&quot;:1,&quot;name&quot;:&quot;Widget&quot;}]" data-cskey="' + key + '" data-csfield="output"></textarea>'
+              +   '</div>'
+              + '</div>'
+              + '<p style="font-size:.72rem;color:var(--pwc-gray);margin-top:.5rem">Populates <code>munit-tools:mock-when &#x2192; then-return &#x2192; payload</code>.</p>';
+      } else {
+        html += '<div>'
+              +   '<label style="display:block;font-size:.72rem;font-weight:700;color:var(--pwc-gray-dark);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.35rem">'
+              +     '&#x1F4E4; Published Payload <span style="font-weight:400;text-transform:none;color:var(--pwc-gray)">&#8212; for spy assertions</span>'
+              +   '</label>'
+              +   '<textarea id="out_' + key + '" class="sample-input" rows="4" placeholder="{&quot;eventType&quot;:&quot;ORDER_CREATED&quot;}" data-cskey="' + key + '" data-csfield="output"></textarea>'
+              +   '<p style="font-size:.72rem;color:var(--pwc-gray);margin-top:.5rem">Used in <code>munit-tools:spy &#x2192; after-call &#x2192; assert-that</code>.</p>'
+              + '</div>';
+      }
+
+      html += '  </div></div>';
+    });
+  });
+
+  list.innerHTML = html;
+
+  // Wire up toggle via event delegation (no inline onclick needed)
+  list.querySelectorAll('[data-toggle]').forEach(hdr => {
+    hdr.addEventListener('click', () => toggleCC(hdr.getAttribute('data-toggle')));
+  });
+
+  // Wire up textarea input via event delegation
+  list.querySelectorAll('textarea[data-cskey]').forEach(ta => {
+    ta.addEventListener('input', () => {
+      const k = ta.getAttribute('data-cskey');
+      const f = ta.getAttribute('data-csfield');
+      const connector = connectors.find(item => ('cs_' + (item.id || item.processor + '_' + item._idx)).replace(/[^a-z0-9_]/gi,'_') === k) || {};
+      if (!state.connectorSamples[k]) {
+        state.connectorSamples[k] = {
+          id: connector.id || k,
+          flow: connector.flowName || connector.flow || '',
+          source_flow: connector.source_flow || connector.flow || '',
+          processor: connector.processor || connector.type || '',
+          doc_name: connector.doc_name || connector.display_name || '',
+          input:'',
+          output:''
+        };
+      }
+      state.connectorSamples[k][f] = ta.value;
+    });
+  });
+}
+
+function toggleCC(bodyId) { document.getElementById(bodyId)?.classList.toggle('open'); }
+
+function saveCS(key) {
+  const inp = document.getElementById(`input-${key}`);
+  const out = document.getElementById(`output-${key}`);
+  state.connectorSamples[key] = { input:inp?.value||'', output:out?.value||'' };
+}
+
+// ─── POM ──────────────────────────────────────────────────────────────────────
+function renderPomResult() {
+  const bv = state.buildValidation;
+  const el = document.getElementById('pomResult');
+  if (!bv||!bv.has_pom) {
+    el.innerHTML=`<div style="padding:.75rem 1rem;background:#fff8e1;border-left:3px solid var(--pwc-warn);font-size:.875rem;color:var(--pwc-black)">
+      ⚠ No pom.xml found in the ZIP. MUnit dependencies cannot be verified automatically.</div>`;
+    return;
+  }
+  const missing = bv.missing_dependencies||bv.recommendations||[];
+  el.innerHTML = !missing.length
+    ? `<div style="padding:.75rem 1rem;background:#e8f5e9;border-left:3px solid var(--pwc-success);font-size:.875rem;color:var(--pwc-black)">
+        ✅ POM validated — MUnit ${esc(bv.munit_version||state.munitVersion)} found.</div>`
+    : `<div style="padding:1rem;background:#fde8e8;border-left:3px solid var(--pwc-error)">
+        <p style="font-weight:700;color:var(--pwc-error);margin-bottom:.5rem;font-size:.875rem">⛔ MUnit dependencies missing in pom.xml</p>
+        <details open>
+          <summary style="font-size:.78rem;font-weight:600;color:var(--pwc-black);cursor:pointer;margin-bottom:.5rem">View snippet to add →</summary>
+          <pre class="pom-block" id="pomSnippet">Loading…</pre>
+          <button class="btn-ghost mt-2" style="font-size:.75rem" onclick="copyPomSnippet()">📋 Copy to clipboard</button>
+        </details></div>`;
+  if (missing.length) loadPomSnippet();
+}
+
+async function loadPomSnippet() {
+  try {
+    const res  = await fetch('/api/pom-snippet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({munit_version:state.munitVersion,runtime_version:state.runtimeVersion})});
+    const data = await res.json();
+    const el   = document.getElementById('pomSnippet');
+    if (el) el.textContent = data.pom_snippet||'';
+  } catch(_){}
+}
+
+function copyPomSnippet() {
+  const el = document.getElementById('pomSnippet');
+  if (el) navigator.clipboard.writeText(el.textContent).then(()=>showToast('Snippet copied','success'));
+}
+
+// ─── Summary ──────────────────────────────────────────────────────────────────
+function renderGenSummary() {
+  document.getElementById('genSummary').innerHTML = [
+    {val:`Mule ${state.runtimeVersion||'—'}`, lbl:'Runtime'},
+    {val:state.munitVersion||'—',             lbl:'MUnit Version'},
+    {val:state.selectedFlows.size,            lbl:'Flows Selected'},
+    {val:Object.keys(state.connectorSamples).length||'Auto',lbl:'Mock Samples'},
+  ].map(s=>`
+    <div class="stat-box">
+      <div class="stat-val">${s.val}</div>
+      <div class="stat-lbl">${s.lbl}</div>
+    </div>`).join('');
+}
+
+// ─── Generate ─────────────────────────────────────────────────────────────────
+async function generateMUnit() {
+  const btn = document.getElementById('genBtn');
+  btn.disabled=true; btn.textContent='Generating…';
+  document.getElementById('genProgressWrap').classList.remove('hidden');
+  document.getElementById('genResults').classList.add('hidden');
+  setProgress(5,'Preparing request…');
+
+  const fd = new FormData();
+  fd.append('xml_source','folder');
+  fd.append('xml_file',state.muleZipFile);
+  if (state.usecaseFile) fd.append('usecase_file',state.usecaseFile);
+  fd.append('selected_flows',JSON.stringify([...state.selectedFlows]));
+  fd.append('target_munit_version',state.munitVersion);
+  fd.append('target_mule_runtime',state.runtimeVersion);
+  fd.append('analysis_id',state.analysisId||'');
+  fd.append('connector_samples',JSON.stringify(state.connectorSamples));
+  if (Object.keys(state.flowTestData).length) fd.append('flow_test_data',JSON.stringify(state.flowTestData));
+
+  try {
+    setProgress(15,'Uploading project…');
+    const res  = await fetch('/api/enhanced/generate',{method:'POST',body:fd});
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error||'Generation failed');
+
+    if (data.needs_user_input) {
+      setProgress(40,'Waiting for test data…');
+      const extra = await askForFlowData((data.clarification_requests||[])[0]?.flow||[...state.selectedFlows][0], data.clarification_requests||[]);
+      if (extra) {
+        fd.set('flow_test_data',JSON.stringify(extra));
+        setProgress(50,'Regenerating with test data…');
+        const res2  = await fetch('/api/enhanced/generate',{method:'POST',body:fd});
+        const data2 = await res2.json();
+        if (!data2.success) throw new Error(data2.error||'Generation failed');
+        if (data2.job_id && !data2.output_files) { await pollJob(data2.job_id, fd); return; }
+        setProgress(100,'Done!'); renderResults(data2); return;
+      }
+    }
+    if (data.job_id && !data.output_files) { await pollJob(data.job_id, fd); }
+    else { setProgress(100,'Done!'); renderResults(data); }
+  } catch(e) {
+    document.getElementById('genProgressWrap').classList.add('hidden');
+    showToast(`Generation failed: ${e.message}`,'error');
+  } finally { btn.disabled=false; btn.textContent='Generate MUnit Tests →'; }
+}
+
+async function pollJob(jobId, fd) {
+  setProgress(20,'Processing…');
+  for (let i=0;i<120;i++) {
+    await sleep(2000);
+    try {
+      const res=await fetch(`/api/job-status/${jobId}`);
+      const data=await res.json();
+      if (data.status==='complete'||data.success) {
+        const result = data.result||data;
+        result.job_id = jobId;
+        setProgress(100,'Done!');
+        renderResults(result);
+        return;
+      }
+      if (data.status==='error') throw new Error(data.message||'Unknown error');
+      if (data.status==='needs_user_input'||data.needs_user_input) {
+        const result = data.result||data;
+        setProgress(40,'Waiting for test data…');
+        const extra=await askForFlowData((result.clarification_requests||[])[0]?.flow||[...state.selectedFlows][0], result.clarification_requests||[]);
+        if (!extra) throw new Error('Generation requires additional sample data');
+        fd.set('flow_test_data',JSON.stringify(extra));
+        setProgress(50,'Regenerating with test data…');
+        const retryRes = await fetch('/api/enhanced/generate',{method:'POST',body:fd});
+        const retryData = await retryRes.json();
+        if (!retryData.success) throw new Error(retryData.error||'Generation failed');
+        if (retryData.job_id && !retryData.output_files) { await pollJob(retryData.job_id, fd); return; }
+        setProgress(100,'Done!');
+        renderResults(retryData);
+        return;
+      } else { setProgress(data.progress||50,data.message||'Generating…'); }
+    } catch(e) { throw e; }
+  }
+  throw new Error('Generation timed out');
+}
+
+// ─── Modal ────────────────────────────────────────────────────────────────────
+function askForFlowData(flowName, requests=[]) {
+  return new Promise(resolve => {
+    state._pendingGenResolve = resolve;
+    document.getElementById('modalFlowName').textContent=`Flow: ${flowName}`;
+    const reason = (requests||[]).map(r => r.reason || r.title).filter(Boolean).join('\n');
+    document.querySelector('#flowDataModal .modal-body > p').textContent =
+      reason || 'Provide the test data for this flow. These values will populate munit:behavior / set-event blocks.';
+    const dynamicRequests = (requests||[]).filter(r => r.type === 'dynamic_flow_ref_resolution');
+    const dynamicWrap = document.getElementById('dynamicFlowTargetsWrap');
+    const dynamicInput = document.getElementById('dynamicFlowTargets');
+    if (dynamicWrap && dynamicInput) {
+      dynamicWrap.classList.toggle('hidden', !dynamicRequests.length);
+      dynamicInput.value = '';
+      dynamicInput.placeholder = dynamicRequests[0]?.placeholder || 'flowA, flowB';
+    }
+    document.getElementById('flowDataModal').classList.remove('hidden');
+    switchModalTab('payload'); initKvRows();
+  });
+}
+
+function submitFlowData() {
+  const data = {
+    payload:          document.getElementById('flowPayload')?.value||'',
+    expectedResponse: document.getElementById('flowExpectedResponse')?.value||'',
+    statusCode:       document.getElementById('flowStatusCode')?.value||'200',
+    queryParams:      collectKvRows('queryParamsRows'),
+    uriParams:        collectKvRows('uriParamsRows'),
+    headers:          collectKvRows('headersRows'),
+    dynamicFlowTargets: document.getElementById('dynamicFlowTargets')?.value||'',
+  };
+  state.flowTestData = data;
+  document.getElementById('flowDataModal').classList.add('hidden');
+  if (state._pendingGenResolve) { state._pendingGenResolve(data); state._pendingGenResolve=null; }
+}
+
+function switchModalTab(name) {
+  const tabs=['payload','queryParams','uriParams','headers','expectedResponse'];
+  tabs.forEach(t=>document.getElementById(`tab-${t}`)?.classList.toggle('hidden',t!==name));
+  document.querySelectorAll('#modalTabs .tab-btn').forEach((b,i)=>b.classList.toggle('active',tabs[i]===name));
+}
+
+// ─── KV rows ──────────────────────────────────────────────────────────────────
+let _kvc=0;
+function initKvRows() {
+  ['queryParamsRows','uriParamsRows','headersRows'].forEach(id=>{
+    const el=document.getElementById(id); if(el&&!el.children.length) addKvRow(id,id.slice(0,2));
+  });
+}
+function addKvRow(cid,prefix) {
+  const el=document.getElementById(cid); if(!el) return;
+  const uid=`${prefix}_${_kvc++}`;
+  const row=document.createElement('div'); row.className='kv-row'; row.id=`krow-${uid}`;
+  row.innerHTML=`<input placeholder="Key" style="border:1px solid var(--pwc-gray-light);padding:.4rem .6rem;font-size:.8rem;width:100%"/>
+    <input placeholder="Value" style="border:1px solid var(--pwc-gray-light);padding:.4rem .6rem;font-size:.8rem;width:100%"/>
+    <button onclick="document.getElementById('krow-${uid}').remove()" style="color:var(--pwc-gray);font-size:1.2rem;line-height:1;cursor:pointer;background:none;border:none;padding:.2rem .4rem">×</button>`;
+  el.appendChild(row);
+}
+function collectKvRows(cid) {
+  const el=document.getElementById(cid); if(!el) return {};
+  const result={};
+  el.querySelectorAll('.kv-row').forEach(row=>{
+    const inp=row.querySelectorAll('input');
+    const k=inp[0]?.value?.trim(); const v=inp[1]?.value?.trim();
+    if(k) result[k]=v||'';
+  });
+  return result;
+}
+
+// ─── Results ──────────────────────────────────────────────────────────────────
+function renderResults(data) {
+  const el = document.getElementById('genResults');
+  el.classList.remove('hidden');
+  const flowOutputs = data.flow_outputs||[];
+  const files       = data.output_files||(data.output_file?[data.output_file]:[]);
+
+  let html=`<div style="display:flex;flex-direction:column;gap:1rem">
+    <div style="padding:.75rem 1rem;background:#e8f5e9;border-left:3px solid var(--pwc-success);font-weight:600;font-size:.875rem">
+      ✅ Generated ${flowOutputs.length||files.length} MUnit file${flowOutputs.length!==1?'s':''} successfully
+    </div>`;
+
+  flowOutputs.forEach(fo=>{
+    const meta=fo.metadata||{};
+    const xml=fo.munit_xml||fo.xml||'';
+    const name=fo.target_flow||fo.flow_name||fo.name||'';
+    const primaryFile = fo.output_file ? [fo.output_file] : [];
+    const extraFiles = fo.extra_files||[];
+    const generatedFiles = [...primaryFile, ...extraFiles]
+      .filter(Boolean)
+      .filter((file, idx, arr) => arr.indexOf(file) === idx);
+    const resourceFiles = generatedFiles.filter(file => /\.(dwl|json|xml|csv|txt)$/i.test(file) && !/\/src\/test\/munit\//.test(file));
+    html+=`
+    <div style="border:1px solid var(--pwc-gray-light);border-top:3px solid var(--pwc-orange)">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:.75rem 1rem;background:var(--pwc-gray-bg);border-bottom:1px solid var(--pwc-gray-light)">
+        <span style="font-weight:700;font-size:.875rem;color:var(--pwc-black)">${esc(name)}</span>
+        <div style="display:flex;gap:.4rem">
+          ${meta.generation_mode?`<span class="pill pill-blue">${esc(meta.generation_mode)}</span>`:''}
+          ${meta.test_count?`<span class="pill pill-orange">${meta.test_count} tests</span>`:''}
+          ${resourceFiles.length?`<span class="pill pill-green">${resourceFiles.length} resources</span>`:''}
+        </div>
+      </div>
+      ${xml?`<div style="padding:.875rem">
+        <textarea class="xml-out" rows="14">${escH(xml)}</textarea>
+        <button class="btn-ghost mt-2" style="font-size:.75rem" onclick="copyXml(this)">📋 Copy XML</button>
+      </div>`:''}
+      ${generatedFiles.length?`<div style="padding:0 .875rem .875rem">
+        <div style="font-weight:700;font-size:.8rem;margin-bottom:.35rem;color:var(--pwc-black)">Generated files</div>
+        <ul style="display:flex;flex-direction:column;gap:.25rem;margin:0;padding-left:1.1rem">
+          ${generatedFiles.map(file=>`<li style="font-size:.78rem;color:var(--pwc-gray-dark);word-break:break-all">${esc(file)}</li>`).join('')}
+        </ul>
+      </div>`:''}
+    </div>`;
+  });
+
+  if (files.length&&!flowOutputs.length) {
+    html+=`<ul style="display:flex;flex-direction:column;gap:.25rem">${files.map(f=>`<li style="font-size:.875rem;color:var(--pwc-orange)">📁 ${esc(f)}</li>`).join('')}</ul>`;
+  }
+  if (data.output_path) {
+    html+=`<div style="padding:.75rem 1rem;background:var(--pwc-gray-bg);border:1px solid var(--pwc-gray-light);font-size:.8rem;color:var(--pwc-gray-dark);word-break:break-all">
+      Output folder: ${esc(data.output_path)}
+    </div>`;
+  }
+  if (data.job_id) {
+    html+=`<div><a class="btn-primary" style="display:inline-block;text-decoration:none" href="/api/download/${encodeURIComponent(data.job_id)}">Download Generated Files</a></div>`;
+  }
+  html+='</div>';
+  el.innerHTML=html;
+}
+
+function copyXml(btn) {
+  const ta=btn.previousElementSibling;
+  navigator.clipboard.writeText(ta.value).then(()=>{btn.textContent='✓ Copied!';setTimeout(()=>btn.textContent='📋 Copy XML',2000);});
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function setProgress(pct,msg) {
+  document.getElementById('genProgress').style.width=pct+'%';
+  document.getElementById('genStatusMsg').textContent=msg;
+}
+function showToast(msg,type='success') {
+  const el=document.getElementById('toast');
+  el.textContent=msg; el.className=`show ${type}`;
+  setTimeout(()=>el.classList.remove('show'),3500);
+}
+function fmtBytes(b) { return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB'; }
+function sleep(ms) { return new Promise(r=>setTimeout(r,ms)); }
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
+function escH(s) { return esc(s); }
+</script>
 </body>
 </html>

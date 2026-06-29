@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Set
+from .compliance_policy import CompliancePolicy
 
 
 class MUnitSemanticValidator:
@@ -26,6 +27,7 @@ class MUnitSemanticValidator:
             "mock_coverage": {},
             "assertion_count": 0,
             "mock_count": 0,
+            "compliance_policy": CompliancePolicy.metadata(),
         }
 
         try:
@@ -46,6 +48,14 @@ class MUnitSemanticValidator:
             for item in (flow_context.get("mock_plan") or [])
             if item.get("action") == "mock-when" and (item.get("match_value") or item.get("doc_name"))
         }
+        expected_mock_pairs = {
+            (
+                item.get("processor", ""),
+                item.get("match_value") or item.get("doc_name") or "",
+            )
+            for item in (flow_context.get("mock_plan") or [])
+            if item.get("action") == "mock-when"
+        }
 
         found_mocks = self._extract_mock_doc_names(suite_xml)
         result["mock_count"] = len(found_mocks)
@@ -59,6 +69,11 @@ class MUnitSemanticValidator:
             "found": sorted(found_mocks),
             "missing": sorted(missing),
             "extra": sorted(extra),
+            "expected_pairs": sorted(
+                f"{processor}::{doc_name}"
+                for processor, doc_name in expected_mock_pairs
+                if processor or doc_name
+            ),
         }
 
         if missing:
@@ -79,7 +94,7 @@ class MUnitSemanticValidator:
 
         set_event = flow_context.get("set_event_plan") or {}
         if set_event.get("attributes_template", {}).get("queryParams"):
-            if "queryParams" not in suite_xml and "set-event_attributes_" not in suite_xml:
+            if "queryParams" not in suite_xml and "set_event_attributes_" not in suite_xml and "set-event_attributes_" not in suite_xml:
                 result["warnings"].append(
                     "Flow reads attributes.queryParams but generated set-event may not include queryParams."
                 )

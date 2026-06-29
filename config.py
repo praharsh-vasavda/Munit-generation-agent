@@ -3,6 +3,7 @@ Configuration management for MUnit Generation Agent.
 """
 
 import os
+import tempfile
 from typing import Optional
 from dotenv import load_dotenv
 from rich.console import Console
@@ -88,7 +89,7 @@ class Config:
     @property
     def output_path(self) -> str:
         """Get output path for generated files."""
-        return os.getenv("OUTPUT_PATH", "./output/")
+        return os.getenv("OUTPUT_PATH", os.path.join(tempfile.gettempdir(), "munit-generation-agent-output"))
     
     @output_path.setter
     def output_path(self, value: str):
@@ -244,7 +245,7 @@ MAX_PROMPT_TOKENS=6000
 LLM_TIMEOUT=60
 
 # Output
-OUTPUT_PATH=./output/
+OUTPUT_PATH=/tmp/munit-generation-agent-output
 """
         return template
 

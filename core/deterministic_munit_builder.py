@@ -13,6 +13,7 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from .compliance_policy import CompliancePolicy
 
 
 MUNIT_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
@@ -27,6 +28,7 @@ MUNIT_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
         http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
 
     <munit:config name="{suite_name}"/>
+{enable_flow_sources}
 
 {tests}
 
@@ -67,6 +69,15 @@ class DeterministicMUnitBuilder:
             scenarios=scenarios,
             generation_mode=generation_mode,
         )
+        munit_plan = self._build_munit_plan(
+            flow_context,
+            scenario_list,
+            generation_mode=generation_mode,
+            sample_payload=sample_payload,
+            connector_samples=connector_samples or {},
+        )
+        enabled_flow_sources = self._enabled_flow_sources(flow_context)
+        enable_flow_sources_xml = self._render_enable_flow_sources(enabled_flow_sources)
 
         resource_files: Dict[str, str] = {}
         tests_xml: List[str] = []
@@ -79,7 +90,7 @@ class DeterministicMUnitBuilder:
                 resource_folder,
                 index,
                 used_test_names=used_test_names,
-                sample_payload=sample_payload if scenario.get("type") == "happy_path" else None,
+                sample_payload=sample_payload,
                 connector_samples=connector_samples or {},
                 recorder_style=(generation_mode == "recorder"),
             )
@@ -88,8 +99,10 @@ class DeterministicMUnitBuilder:
 
         suite_xml = MUNIT_XML_TEMPLATE.format(
             suite_name=suite_name,
+            enable_flow_sources=enable_flow_sources_xml,
             tests="\n".join(tests_xml),
         )
+        suite_xml, resource_files = self._dedupe_reusable_resource_files(suite_xml, resource_files)
 
         metadata = {
             "generation_mode": generation_mode,
@@ -101,10 +114,456 @@ class DeterministicMUnitBuilder:
             "test_count": len(scenario_list),
             "mock_plan_count": len(flow_context.get("mock_plan", []) or []),
             "scenario_plan": scenario_list,
+            "munit_plan": munit_plan,
+            "enabled_flow_sources": enabled_flow_sources,
             "target_munit_version": target_munit_version,
+            "compliance_policy": CompliancePolicy.metadata(),
             "preflight_validation": self._validate_generated_suite(suite_xml, resource_files, flow_context),
         }
         return suite_xml, metadata
+
+    def _build_munit_plan(
+        self,
+        flow_context: Dict[str, Any],
+        scenarios: List[Dict[str, Any]],
+        *,
+        generation_mode: str,
+        sample_payload: Optional[str] = None,
+        connector_samples: Optional[Dict[str, Dict[str, str]]] = None,
+    ) -> Dict[str, Any]:
+        """Build the explicit Behavior / Execution / Validation plan used for rendering."""
+        target_flow = flow_context.get("target_flow", "main-flow")
+        set_event_plan = flow_context.get("set_event_plan") or {}
+        required_inputs = flow_context.get("required_inputs") or {}
+        mock_plan = flow_context.get("mock_plan") or []
+        warnings = []
+
+        behavior_mocks = []
+        behavior_verifications = []
+        behavior_spies = self._build_spy_plan(flow_context)
+        for item in mock_plan:
+            entry = {
+                "processor": item.get("processor", ""),
+                "flow": item.get("flow", ""),
+                "doc_name": item.get("doc_name", ""),
+                "match_attribute": item.get("match_attribute", "doc:name"),
+                "match_value": item.get("match_value") or item.get("doc_name") or item.get("processor", ""),
+                "result_shape": item.get("result_shape"),
+                "media_type": item.get("media_type"),
+            }
+            if not entry["doc_name"]:
+                warnings.append({
+                    "type": "missing_doc_name",
+                    "message": f"{entry['processor']} has no doc:name; mock matching will use {entry['match_attribute']}.",
+                    "processor": entry["processor"],
+                    "flow": entry["flow"],
+                })
+            if item.get("action") == "mock-when":
+                behavior_mocks.append(entry)
+            elif item.get("action") == "verify-call":
+                behavior_verifications.append(entry)
+
+        validation_plan = [
+            self._validation_plan_for_scenario(
+                flow_context,
+                scenario,
+                sample_payload=sample_payload,
+                connector_samples=connector_samples or {},
+            )
+            for scenario in scenarios
+        ]
+        if not any(item.get("assertions") or item.get("verifications") for item in validation_plan):
+            warnings.append({
+                "type": "weak_validation",
+                "message": "No implementation-driven validation could be derived; generated suite may need manual assertion review.",
+            })
+
+        warnings.extend(flow_context.get("flow_traversal_warnings") or [])
+        warnings.extend(flow_context.get("unresolved_flow_refs") or [])
+        clarification_requests = self._build_clarification_requests(
+            flow_context,
+            sample_payload=sample_payload,
+            connector_samples=connector_samples or {},
+        )
+
+        attrs = set_event_plan.get("attributes_template") or {}
+        return {
+            "targetFlow": target_flow,
+            "generationMode": generation_mode,
+            "execution": {
+                "callFlow": target_flow,
+                "callOnlySelectedFlow": True,
+                "setEventLocation": "execution",
+                "setEventRequired": bool(set_event_plan),
+                "payloadRequired": bool(required_inputs.get("payloadRequired")),
+                "method": attrs.get("method"),
+                "requestPath": attrs.get("requestPath"),
+                "headers": sorted((attrs.get("headers") or {}).keys()),
+                "queryParams": sorted((attrs.get("queryParams") or {}).keys()),
+                "uriParams": sorted((attrs.get("uriParams") or {}).keys()),
+            },
+            "behavior": {
+                "mockWhen": behavior_mocks,
+                "spy": behavior_spies,
+                "verifyLater": behavior_verifications,
+                "source": "mock_plan_from_full_flow_traversal",
+            },
+            "validation": validation_plan,
+            "traversal": {
+                "flows": flow_context.get("execution_flows", []),
+                "flowLevels": flow_context.get("flow_levels", {}),
+                "connectors": flow_context.get("traversal_connectors", []),
+                "enabledFlowSources": self._enabled_flow_sources(flow_context),
+            },
+            "warnings": warnings,
+            "clarificationRequests": clarification_requests,
+            "compliance": CompliancePolicy.metadata(),
+        }
+
+    def _enabled_flow_sources(self, flow_context: Dict[str, Any]) -> List[str]:
+        """Return dynamically resolved flow names to expose through munit:enable-flow-sources."""
+        candidates = flow_context.get("munit_enable_flow_sources") or []
+        if not candidates:
+            candidates = flow_context.get("dynamic_flow_sources") or []
+
+        seen = set()
+        result: List[str] = []
+        target_flow = flow_context.get("target_flow")
+        for name in candidates:
+            flow_name = str(name or "").strip()
+            if not flow_name or flow_name == target_flow or flow_name in seen:
+                continue
+            seen.add(flow_name)
+            result.append(flow_name)
+        return result
+
+    def _render_enable_flow_sources(self, flow_names: List[str]) -> str:
+        if not flow_names:
+            return ""
+        rows = "\n".join(
+            f'        <munit:enable-flow-source value="{self._xml_escape(flow_name)}"/>'
+            for flow_name in flow_names
+        )
+        return f"""
+    <munit:enable-flow-sources>
+{rows}
+    </munit:enable-flow-sources>
+"""
+
+    def _build_spy_plan(self, flow_context: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Plan optional spies for named DataWeave/transform processors."""
+        spies: List[Dict[str, str]] = []
+        seen = set()
+        for processor in flow_context.get("processor_chain", []) or []:
+            processor_type = processor.get("type") or ""
+            doc_name = processor.get("doc_name") or ""
+            if not doc_name:
+                continue
+            if processor_type not in {"ee:transform", "ee:set-payload", "set-payload", "transform"}:
+                continue
+            key = (processor_type, doc_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            spies.append({
+                "processor": processor_type,
+                "doc_name": doc_name,
+                "match_attribute": "doc:name",
+                "match_value": doc_name,
+                "phase": "after-call",
+                "assertion": "payload not null",
+                "reason": "DataWeave output can be observed without mocking the transform",
+            })
+        return spies[:4]
+
+    def _build_clarification_requests(
+        self,
+        flow_context: Dict[str, Any],
+        *,
+        sample_payload: Optional[str],
+        connector_samples: Dict[str, Dict[str, str]],
+    ) -> List[Dict[str, Any]]:
+        """Ask for user-safe examples when static analysis cannot know real data."""
+        requests: List[Dict[str, Any]] = []
+        requested_input_fields = self._missing_input_field_groups(flow_context)
+        if not sample_payload and (flow_context.get("required_inputs") or {}).get("payloadRequired"):
+            requests.append({
+                "type": "sample_request_response",
+                "flow": flow_context.get("target_flow", ""),
+                "title": "Provide request and expected response sample",
+                "sample_kind": "request_response",
+                "reason": "This flow reads request data. Provide one synthetic request sample with payload, queryParams, uriParams, and headers as needed, plus the expected response if known.",
+                "requested_fields": requested_input_fields,
+                "security_note": "Provide synthetic or masked data only. Do not include secrets or production PII.",
+            })
+
+        for item in flow_context.get("mock_plan", []) or []:
+            if item.get("action") != "mock-when":
+                continue
+            key = self._connector_sample_key(flow_context.get("target_flow", ""), item)
+            if key in connector_samples:
+                continue
+            if item.get("downstream_payload_references") or item.get("downstream_dwl_excerpt"):
+                continue
+            requests.append({
+                "type": "connector_mock_response",
+                "flow": flow_context.get("target_flow", ""),
+                "connector_key": key,
+                "processor": item.get("processor", ""),
+                "doc_name": item.get("doc_name") or item.get("match_value") or item.get("processor", ""),
+                "title": "Provide mock response for external connector",
+                "sample_kind": "connector_response",
+                "reason": "This external connector will be mocked. Provide the synthetic response body that this connector should return during the MUnit test.",
+                "security_note": "Provide a synthetic response sample. The agent must not call live systems.",
+            })
+
+        for unresolved in flow_context.get("unresolved_flow_refs", []) or []:
+            unresolved_reason = unresolved.get("reason") or "Dynamic flow-ref target could not be resolved safely from code."
+            requests.append({
+                "type": "dynamic_flow_ref_resolution",
+                "flow": unresolved.get("flow") or flow_context.get("target_flow", ""),
+                "expression": unresolved.get("expression", ""),
+                "title": "Provide dynamic flow-ref targets",
+                "sample_kind": "dynamic_flow_targets",
+                "reason": f"{unresolved_reason}. Provide possible target flow names and the condition/input that selects each target.",
+                "placeholder": '[{"condition":"payload.type == \\"A\\"","targetFlow":"processAFlow"},{"condition":"otherwise","targetFlow":"processBFlow"}]',
+                "security_note": "Provide possible target flow names only, not sensitive payload data.",
+            })
+
+        if not sample_payload and not any(item.get("type") == "sample_request_response" for item in requests):
+            requests.extend(self._synthetic_default_clarification_requests(flow_context))
+        return requests[:8]
+
+    def _synthetic_default_clarification_requests(self, flow_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Ask for one grouped request sample when static analysis used generic placeholders."""
+        requested_fields = self._missing_input_field_groups(flow_context)
+        if not any(requested_fields.values()):
+            return []
+        return [{
+            "type": "sample_request_response",
+            "flow": flow_context.get("target_flow", ""),
+            "title": "Provide request sample",
+            "sample_kind": "request_response",
+            "reason": "Static analysis found request inputs but cannot infer reliable values. Provide one synthetic request sample with payload, queryParams, uriParams, and headers instead of field-by-field values.",
+            "requested_fields": requested_fields,
+            "security_note": "Provide synthetic or masked data only. Do not include secrets or production PII.",
+        }]
+
+    def _missing_input_field_groups(self, flow_context: Dict[str, Any]) -> Dict[str, List[str]]:
+        """Group unknown request inputs by source so UI can ask for one sample."""
+        set_event_plan = flow_context.get("set_event_plan") or {}
+        attrs = set_event_plan.get("attributes_template") or {}
+        groups: Dict[str, List[str]] = {
+            "payload": [],
+            "queryParams": [],
+            "uriParams": [],
+            "headers": [],
+        }
+
+        def add(location: str, field: str) -> None:
+            if field and field not in groups.setdefault(location, []):
+                groups[location].append(field)
+
+        for location, values in (
+            ("headers", attrs.get("headers") or {}),
+            ("queryParams", attrs.get("queryParams") or {}),
+            ("uriParams", attrs.get("uriParams") or {}),
+        ):
+            for field, value in values.items():
+                if value == "MOCK-VALUE":
+                    add(location, field)
+
+        payload_expression = (set_event_plan.get("payload_expression") or "").strip()
+        if "MOCK-VALUE" in payload_expression:
+            try:
+                parsed = json.loads(payload_expression)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                for field, value in parsed.items():
+                    if value == "MOCK-VALUE":
+                        add("payload", field)
+            else:
+                add("payload", "payload")
+
+        for variable in flow_context.get("variable_writes", []) or []:
+            expression = " ".join([
+                variable.get("value") or "",
+                variable.get("dwl_excerpt") or "",
+            ])
+            for location, field in self._input_fields_from_expression(expression):
+                add(location, field)
+
+        return {key: sorted(values) for key, values in groups.items() if values}
+
+    def _input_fields_from_expression(self, expression: str) -> List[Tuple[str, str]]:
+        """Extract request input fields referenced by set-variable/DataWeave expressions."""
+        text = expression or ""
+        field_refs: List[Tuple[str, str]] = []
+
+        def add(location: str, field: str) -> None:
+            if field and (location, field) not in field_refs:
+                field_refs.append((location, field))
+
+        patterns = [
+            ("payload", r"\bpayload\.([A-Za-z_][A-Za-z0-9_-]*)"),
+            ("queryParams", r"\battributes\.queryParams(?:\.|\[['\"])([A-Za-z_][A-Za-z0-9_-]*)"),
+            ("uriParams", r"\battributes\.uriParams(?:\.|\[['\"])([A-Za-z_][A-Za-z0-9_-]*)"),
+            ("headers", r"\battributes\.headers(?:\.|\[['\"])([A-Za-z_][A-Za-z0-9_-]*)"),
+        ]
+        for location, pattern in patterns:
+            for match in re.findall(pattern, text):
+                add(location, match)
+        return field_refs
+
+    def _validation_plan_for_scenario(
+        self,
+        flow_context: Dict[str, Any],
+        scenario: Dict[str, Any],
+        *,
+        sample_payload: Optional[str] = None,
+        connector_samples: Optional[Dict[str, Dict[str, str]]] = None,
+    ) -> Dict[str, Any]:
+        """Describe why validation uses assert-that, assert-expression, or verify-call."""
+        scenario_type = scenario.get("type", "happy_path")
+        plan = {
+            "scenario": scenario.get("name") or scenario_type,
+            "type": scenario_type,
+            "assertionStrategy": scenario.get("assertion_strategy", "payload_equals_expected"),
+            "assertions": [],
+            "verifications": [],
+            "expectedErrorType": self._expected_error_type(scenario) if self._scenario_expects_thrown_error(scenario) else None,
+        }
+
+        if scenario_type in {"downstream_failure", "downstream_api_failure", "error_scenario"}:
+            if scenario.get("assertion_strategy") == "error_handler_response":
+                plan["assertions"].append({
+                    "kind": "assert-expression",
+                    "target": "payload",
+                    "reason": "error handler transforms or sets an error response",
+                })
+            elif self._error_handler_has_only_verifiable_side_effects(flow_context):
+                plan["verifications"].extend(self._error_handler_verification_plan(flow_context))
+            else:
+                plan["assertions"].append({
+                    "kind": "assert-that",
+                    "target": "error.errorType.identifier",
+                    "reason": "failure path should surface an expected error type",
+                })
+            return plan
+
+        if scenario_type in {"empty_payload", "invalid_input", "validation_error"}:
+            if self._scenario_expects_thrown_error(scenario):
+                return plan
+            plan["assertions"].append({
+                "kind": "assert-that",
+                "target": "error.errorType.identifier",
+                "reason": "invalid input should trigger validation error",
+            })
+            return plan
+
+        final_processor = flow_context.get("final_processor") or {}
+        output_fields = flow_context.get("output_fields") or []
+        dynamic_fields = self._dynamic_output_fields(flow_context)
+        if self._expected_output_from_sample(sample_payload) is not None:
+            plan["assertions"].append({
+                "kind": "assert-expression",
+                "target": "payload",
+                "reason": "user-provided sample response determines expected output",
+            })
+            return plan
+        if final_processor.get("dwl_excerpt"):
+            if dynamic_fields:
+                for field in output_fields[:6]:
+                    dynamic_reason = dynamic_fields.get(field)
+                    plan["assertions"].append({
+                        "kind": "assert-that",
+                        "target": f"payload.{field}",
+                        "matcher": (
+                            "matchesRegex" if dynamic_reason == "uuid"
+                            else "notNullValue" if dynamic_reason
+                            else "equalTo"
+                        ),
+                        "reason": "dynamic runtime value" if dynamic_reason else "stable final DataWeave field",
+                    })
+            else:
+                plan["assertions"].append({
+                    "kind": "assert-expression",
+                    "target": "payload",
+                    "reason": "final DataWeave output determines response contract",
+                })
+        elif output_fields:
+            for field in output_fields[:3]:
+                plan["assertions"].append({
+                    "kind": "assert-that",
+                    "target": f"payload.{field}",
+                    "reason": "derived output field should be present",
+                })
+        elif flow_context.get("mock_plan"):
+            plan["assertions"].append({
+                "kind": "assert-expression",
+                "target": "payload",
+                "reason": "flow response is derived from mocked downstream connector output",
+            })
+        plan["verifications"].extend([
+            {
+                "kind": "verify-call",
+                "processor": item.get("processor", ""),
+                "doc_name": item.get("doc_name") or item.get("match_value") or item.get("processor", ""),
+                "reason": "side-effect connector execution is the observable behavior",
+            }
+            for item in (flow_context.get("mock_plan") or [])
+            if item.get("action") == "verify-call"
+        ])
+        return plan
+
+    def _dedupe_reusable_resource_files(
+        self,
+        suite_xml: str,
+        resource_files: Dict[str, str],
+    ) -> Tuple[str, Dict[str, str]]:
+        """Reuse one generated DWL resource when another file has identical content."""
+        canonical_by_content: Dict[Tuple[str, str], str] = {}
+        deduped_files: Dict[str, str] = {}
+
+        for name, content in resource_files.items():
+            if not name.endswith(".dwl"):
+                deduped_files[name] = content
+                continue
+
+            category = self._resource_dedupe_category(name)
+            canonical = canonical_by_content.get((category, content))
+            if canonical:
+                suite_xml = self._replace_resource_reference(suite_xml, name, canonical)
+                continue
+
+            canonical_by_content[(category, content)] = name
+            deduped_files[name] = content
+
+        return suite_xml, deduped_files
+
+    def _resource_dedupe_category(self, name: str) -> str:
+        """Dedupe identical resources within the same semantic category."""
+        if name.startswith("set-event_payload") or name.startswith("set_event_payload"):
+            return "set-event-payload"
+        if name.startswith("set-event_attributes") or name.startswith("set_event_attributes"):
+            return "set-event-attributes"
+        if name.startswith("mock_") and name.endswith("_attributes.dwl"):
+            return "mock-attributes"
+        if name.startswith("mock_"):
+            return "mock-payload"
+        if name.startswith("assert_") or name.startswith("assert-expression"):
+            return "assertion"
+        return "other"
+
+    def _replace_resource_reference(self, suite_xml: str, old_name: str, canonical_name: str) -> str:
+        """Update resource-file and extensionless module references after dedupe."""
+        suite_xml = suite_xml.replace(old_name, canonical_name)
+        if old_name.endswith(".dwl") and canonical_name.endswith(".dwl"):
+            old_module = old_name.rsplit(".", 1)[0]
+            canonical_module = canonical_name.rsplit(".", 1)[0]
+            suite_xml = suite_xml.replace(old_module, canonical_module)
+        return suite_xml
 
     def _build_scenario_plan(
         self,
@@ -148,7 +607,21 @@ class DeterministicMUnitBuilder:
                     "expected_error_type": "VALIDATION:INVALID_BOOLEAN",
                 })
 
-            for branch_index, branch in enumerate(branch_points[:2], start=1):
+            for branch_index, branch in enumerate(branch_points[:6], start=1):
+                if branch.get("type") == "otherwise":
+                    continue
+                if branch.get("terminates_with_error"):
+                    scenario_name = self._branch_error_scenario_name(branch, branch_index)
+                    planned.append({
+                        "name": scenario_name,
+                        "type": "validation_error",
+                        "description": branch.get("description") or f"Choice branch {branch_index} raises an error",
+                        "branch_condition": branch.get("condition", ""),
+                        "assertion_strategy": "expected_error",
+                        "expected_error_type": branch.get("expected_error_type") or "VALIDATION:INVALID_BOOLEAN",
+                        "terminates_with_error": True,
+                    })
+                    continue
                 planned.append({
                     "name": f"branch_{branch_index}",
                     "type": "branch_path",
@@ -157,9 +630,29 @@ class DeterministicMUnitBuilder:
                     "assertion_strategy": "payload_equals_expected",
                 })
 
+            for dynamic_ref in (flow_context.get("dynamic_flow_refs") or [])[:4]:
+                for candidate_index, candidate in enumerate((dynamic_ref.get("candidates") or [])[:4], start=1):
+                    target_flow = candidate.get("flow")
+                    if not target_flow:
+                        continue
+                    planned.append({
+                        "name": f"dynamic_{self._slugify(target_flow)}",
+                        "type": "branch_path",
+                        "description": (
+                            f"Dynamic flow-ref {dynamic_ref.get('doc_name') or dynamic_ref.get('expression')} "
+                            f"routes to {target_flow}"
+                        ),
+                        "branch_condition": candidate.get("condition", ""),
+                        "dynamic_flow_ref": dynamic_ref.get("expression", ""),
+                        "dynamic_target_flow": target_flow,
+                        "assertion_strategy": "payload_equals_expected",
+                    })
+
             for item in mock_plan[:2]:
                 shape = item.get("result_shape", "object")
                 if shape not in {"array", "object", "affectedRows"}:
+                    continue
+                if not self._should_plan_empty_downstream_scenario(item):
                     continue
                 planned.append({
                     "name": f"{self._slugify(item.get('doc_name') or item.get('processor'))}_empty_result",
@@ -186,6 +679,35 @@ class DeterministicMUnitBuilder:
                 })
 
         return self._dedupe_scenarios(planned)
+
+    def _branch_error_scenario_name(self, branch: Dict[str, Any], branch_index: int) -> str:
+        """Name branch error tests from the actual validation/raise-error action."""
+        candidates = [
+            (branch.get("raise_error") or {}).get("doc_name"),
+            (branch.get("validation_failure") or {}).get("doc_name"),
+            branch.get("description"),
+        ]
+        for candidate in candidates:
+            slug = self._slugify(candidate or "")
+            if slug and slug not in {"flow", "when", "otherwise"} and not slug.startswith("when-branch"):
+                return slug
+        return f"branch-{branch_index}-raises-error"
+
+    def _should_plan_empty_downstream_scenario(self, mock_item: Dict[str, Any]) -> bool:
+        """Only generate empty-result scenarios when the downstream transform can plausibly handle them."""
+        shape = mock_item.get("result_shape", "object")
+        if shape in {"array", "affectedRows"}:
+            return True
+        if mock_item.get("processor") == "http:request" and mock_item.get("downstream_dwl_excerpt"):
+            return False
+        script = mock_item.get("downstream_dwl_excerpt") or ""
+        if not script:
+            return True
+        risky_patterns = [
+            r"\bpayload\.[A-Za-z_][A-Za-z0-9_-]*\.",
+            r"\bpayload\.[A-Za-z_][A-Za-z0-9_-]*\s*\[",
+        ]
+        return not any(re.search(pattern, script) for pattern in risky_patterns)
 
     def _dedupe_scenarios(self, scenarios: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen = set()
@@ -239,6 +761,53 @@ class DeterministicMUnitBuilder:
                 return True
         return False
 
+    def _error_handler_has_only_verifiable_side_effects(self, flow_context: Dict[str, Any]) -> bool:
+        """Return True when error handlers do work like logging but do not build a response."""
+        handlers = flow_context.get("error_handler_details", []) or []
+        if not handlers:
+            return False
+        has_verifiable = False
+        for handler in handlers:
+            if self._error_handler_has_response_logic(handler):
+                return False
+            if self._error_handler_verification_plan({"error_handler_details": [handler]}):
+                has_verifiable = True
+        return has_verifiable
+
+    def _error_handler_verification_plan(self, flow_context: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Return processors in error handlers that should be validated with verify-call."""
+        verifiable_processors = {
+            "logger",
+            "anypoint-mq:publish",
+            "kafka:producer",
+            "email:send",
+            "sftp:write",
+            "file:write",
+            "jms:publish",
+            "vm:publish",
+            "objectstore:store",
+            "objectstore:remove",
+        }
+        verifications: List[Dict[str, str]] = []
+        seen = set()
+        for handler in flow_context.get("error_handler_details", []) or []:
+            for processor in handler.get("processors", []) or []:
+                processor_type = processor.get("type") or ""
+                if processor_type not in verifiable_processors:
+                    continue
+                doc_name = processor.get("doc_name") or processor_type
+                key = (processor_type, doc_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                verifications.append({
+                    "kind": "verify-call",
+                    "processor": processor_type,
+                    "doc_name": doc_name,
+                    "reason": "error handler side effect is the observable behavior",
+                })
+        return verifications
+
     def write_maven_layout(
         self,
         suite_xml: str,
@@ -279,13 +848,13 @@ class DeterministicMUnitBuilder:
     ) -> Tuple[str, Dict[str, str]]:
         target_flow = flow_context.get("target_flow", "main-flow")
         scenario_slug = self._slugify(scenario.get("name") or scenario.get("type") or f"scenario-{index}")
+        resource_suffix = self._resource_suffix_for_scenario(scenario, index)
         test_name = self._unique_test_name(
             f"{self._slugify(target_flow)}-{scenario_slug}-test",
             used_test_names,
         )
         description = scenario.get("description", f"{scenario_slug} for {target_flow}")
 
-        behavior_parts: List[str] = []
         resource_files: Dict[str, str] = {}
 
         set_event_xml, set_files = self._build_set_event(
@@ -293,9 +862,9 @@ class DeterministicMUnitBuilder:
             scenario,
             resource_folder,
             index,
+            resource_suffix,
             sample_payload=sample_payload,
         )
-        behavior_parts.append(set_event_xml)
         resource_files.update(set_files)
 
         mock_parts, mock_files = self._build_mocks(
@@ -303,18 +872,20 @@ class DeterministicMUnitBuilder:
             scenario,
             resource_folder,
             index,
+            resource_suffix,
             connector_samples=connector_samples,
         )
-        behavior_parts.extend(mock_parts)
         resource_files.update(mock_files)
+        spy_parts = self._build_spies(flow_context, scenario)
 
         validation_xml, assert_files = self._build_validation(
             flow_context,
             scenario,
             resource_folder,
             index,
+            resource_suffix,
             recorder_style=recorder_style,
-            sample_payload=sample_payload,
+            sample_payload=sample_payload if not self._scenario_expects_thrown_error(scenario) else None,
             connector_samples=connector_samples,
         )
         verify_xml = self._build_verify_calls(flow_context, scenario)
@@ -326,19 +897,61 @@ class DeterministicMUnitBuilder:
         if self._scenario_expects_thrown_error(scenario):
             expected_error = f' expectedErrorType="{self._xml_escape(self._expected_error_type(scenario))}"'
 
-        test_xml = f"""    <munit:test name="{test_name}" description="{self._xml_escape(description)}"{expected_error}>
-        <munit:behavior>
-{chr(10).join(behavior_parts)}
+        behavior_body = "\n".join(mock_parts + spy_parts)
+        behavior_xml = (
+            f"""        <munit:behavior>
+{behavior_body}
         </munit:behavior>
-        <munit:execution>
-            <flow-ref doc:name="Execute {self._xml_escape(target_flow)}" name="{self._xml_escape(target_flow)}"/>
-        </munit:execution>
-        <munit:validation>
+"""
+            if behavior_body.strip()
+            else ""
+        )
+        validation_xml = validation_xml.strip()
+        validation_section = (
+            f"""        <munit:validation>
 {validation_xml}
         </munit:validation>
-    </munit:test>"""
+"""
+            if validation_xml
+            else ""
+        )
+
+        test_xml = f"""    <munit:test name="{test_name}" description="{self._xml_escape(description)}"{expected_error}>
+{behavior_xml}        <munit:execution>
+{set_event_xml}
+            <flow-ref doc:name="Execute {self._xml_escape(target_flow)}" name="{self._xml_escape(target_flow)}"/>
+        </munit:execution>
+{validation_section}    </munit:test>"""
 
         return test_xml, resource_files
+
+    def _build_spies(self, flow_context: Dict[str, Any], scenario: Dict[str, Any]) -> List[str]:
+        """Render conservative spies for DataWeave processors on non-error scenarios."""
+        if scenario.get("type") in {"downstream_failure", "downstream_api_failure", "error_scenario", "validation_error", "invalid_input", "empty_payload"}:
+            return []
+        if flow_context.get("mock_plan"):
+            return []
+        parts: List[str] = []
+        for item in self._build_spy_plan(flow_context):
+            processor = item.get("processor", "")
+            match_attr = item.get("match_attribute", "doc:name")
+            match_value = item.get("match_value") or item.get("doc_name") or processor
+            doc_name = item.get("doc_name") or processor
+            parts.append(
+                f"""            <munit-tools:spy doc:name="Spy {self._xml_escape(doc_name)}" processor="{self._xml_escape(processor)}">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="{self._xml_escape(match_attr)}" whereValue="{self._xml_escape(match_value)}"/>
+                </munit-tools:with-attributes>
+                <munit-tools:after-call>
+                    <munit-tools:assert-that
+                        doc:name="Assert {self._xml_escape(doc_name)} output"
+                        expression="#[payload]"
+                        is="#[MunitTools::notNullValue()]"
+                        message="DataWeave output should be present"/>
+                </munit-tools:after-call>
+            </munit-tools:spy>"""
+            )
+        return parts
 
     def _build_set_event(
         self,
@@ -346,6 +959,7 @@ class DeterministicMUnitBuilder:
         scenario: Dict[str, Any],
         resource_folder: str,
         index: int,
+        resource_suffix: str,
         *,
         sample_payload: Optional[str],
     ) -> Tuple[str, Dict[str, str]]:
@@ -353,11 +967,11 @@ class DeterministicMUnitBuilder:
         plan = self._apply_scenario_to_set_event_plan(plan, scenario)
         files: Dict[str, str] = {}
 
-        if sample_payload and scenario.get("type") == "happy_path":
-            payload_file = f"set-event_payload_{index}.dwl"
-            attrs_file = f"set-event_attributes_{index}.dwl"
-            payload_dwl, attrs_dwl = self._split_sample_payload(sample_payload, plan)
-            files[payload_file] = payload_dwl
+        if sample_payload:
+            payload_file = f"set_event_payload_{resource_suffix}.dwl"
+            attrs_file = f"set_event_attributes_{resource_suffix}.dwl"
+            payload_dwl, attrs_dwl = self._split_sample_payload(sample_payload, plan, scenario=scenario)
+            files[payload_file] = self._sanitize_set_event_payload_resource_content(payload_dwl)
             files[attrs_file] = attrs_dwl
             payload_media_type = self._infer_resource_media_type(payload_dwl, plan.get("payload_media_type"))
             attributes_media_type = self._infer_attributes_media_type(attrs_dwl)
@@ -374,23 +988,44 @@ class DeterministicMUnitBuilder:
             plan["payload_expression"] = '""'
             plan["payload_media_type"] = "application/java"
 
-        payload_file = f"set-event_payload_{index}.dwl"
-        attrs_file = f"set-event_attributes_{index}.dwl"
-        files[payload_file] = self._plan_to_payload_dwl(plan)
-        files[attrs_file] = self._plan_to_attributes_dwl(plan)
-        payload_media_type = self._infer_resource_media_type(
-            files[payload_file],
-            plan.get("payload_media_type"),
+        payload_file = f"set_event_payload_{resource_suffix}.dwl"
+        attrs_file = f"set_event_attributes_{resource_suffix}.dwl"
+        payload_dwl = self._plan_to_payload_dwl(plan)
+        use_inline_empty_payload = (
+            self._should_inline_empty_request_payload(plan, payload_dwl)
+            and scenario.get("type") not in {"validation_error", "invalid_input", "empty_payload"}
         )
+        if not use_inline_empty_payload:
+            files[payload_file] = self._sanitize_set_event_payload_resource_content(payload_dwl)
+        files[attrs_file] = self._plan_to_attributes_dwl(plan)
+        payload_media_type = self._infer_resource_media_type(payload_dwl, plan.get("payload_media_type"))
         attributes_media_type = self._infer_attributes_media_type(files[attrs_file])
+        payload_xml = (
+            f"""                <munit:payload value="#['']" mediaType="{payload_media_type}"/>"""
+            if use_inline_empty_payload
+            else f"""                <munit:payload value="#[MunitTools::getResourceAsString('{resource_folder}/{payload_file}')]" mediaType="{payload_media_type}" encoding="UTF-8"/>"""
+        )
 
         return (
             f"""            <munit:set-event doc:name="Set Input">
-                <munit:payload value="#[MunitTools::getResourceAsString('{resource_folder}/{payload_file}')]" mediaType="{payload_media_type}" encoding="UTF-8"/>
+{payload_xml}
                 <munit:attributes value="#[read(MunitTools::getResourceAsString('{resource_folder}/{attrs_file}'), 'application/json')]" mediaType="{attributes_media_type}"/>
             </munit:set-event>""",
             files,
         )
+
+    def _should_inline_empty_request_payload(self, plan: Dict[str, Any], payload_dwl: str) -> bool:
+        """Avoid creating empty payload sidecar files for request methods without bodies."""
+        attrs = plan.get("attributes_template") or {}
+        method = (attrs.get("method") or "").upper()
+        if method not in {"GET", "DELETE", "HEAD", "OPTIONS"}:
+            return False
+
+        payload_expression = plan.get("payload_expression")
+        if payload_expression not in {'""', None}:
+            return False
+
+        return payload_dwl.strip() in {'"" as Binary {base: "64"}', '""'}
 
     def _build_mocks(
         self,
@@ -398,6 +1033,7 @@ class DeterministicMUnitBuilder:
         scenario: Dict[str, Any],
         resource_folder: str,
         index: int,
+        resource_suffix: str,
         *,
         connector_samples: Dict[str, Dict[str, str]],
     ) -> Tuple[List[str], Dict[str, str]]:
@@ -406,7 +1042,7 @@ class DeterministicMUnitBuilder:
         mock_plan = flow_context.get("mock_plan", []) or []
         scenario_type = scenario.get("type", "happy_path")
 
-        if scenario_type in {"empty_payload", "invalid_input", "validation_error"}:
+        if scenario.get("terminates_with_error") or scenario_type in {"empty_payload", "invalid_input", "validation_error"}:
             return parts, files
 
         for mock_index, item in enumerate(mock_plan, start=1):
@@ -421,7 +1057,9 @@ class DeterministicMUnitBuilder:
             match_attr = item.get("match_attribute", "doc:name")
             match_value = item.get("match_value") or doc_name
 
-            if scenario_type in {"downstream_failure", "downstream_api_failure", "error_scenario"} and self._is_failed_mock_for_scenario(item, scenario):
+            if scenario_type in {"downstream_failure", "downstream_api_failure", "error_scenario"}:
+                if not self._is_failed_mock_for_scenario(item, scenario):
+                    continue
                 error_type = self._expected_error_type(scenario) or self._error_type_for_processor(processor)
                 parts.append(
                     f"""            <munit-tools:mock-when doc:name="Mock {self._xml_escape(doc_name)} failure" processor="{processor}">
@@ -433,9 +1071,9 @@ class DeterministicMUnitBuilder:
                 </munit-tools:then-return>
             </munit-tools:mock-when>"""
                 )
-                continue
+                break
 
-            mock_file = f"mock_{self._slugify(doc_name)}_{index}_{mock_index}.dwl"
+            mock_file = f"mock_{self._slugify(doc_name)}_{resource_suffix}_{mock_index}.dwl"
             sample = connector_samples.get(self._connector_sample_key(flow_context.get("target_flow", ""), item), {})
             mock_body = self._build_mock_payload_dwl(item, scenario_type, flow_context, sample=sample, scenario=scenario)
             files[mock_file] = mock_body
@@ -444,7 +1082,7 @@ class DeterministicMUnitBuilder:
                 sample.get("media_type") or item.get("media_type"),
             )
             attrs = item.get("return_attributes") or {"statusCode": 200}
-            attrs_file = f"mock_{self._slugify(doc_name)}_{index}_{mock_index}_attributes.dwl"
+            attrs_file = f"mock_{self._slugify(doc_name)}_{resource_suffix}_{mock_index}_attributes.dwl"
             files[attrs_file] = self._build_mock_resource_content(attrs)
             attributes_media_type = self._infer_attributes_media_type(files[attrs_file])
             parts.append(
@@ -483,11 +1121,11 @@ class DeterministicMUnitBuilder:
                     item.get("match_value") or item.get("doc_name") or item.get("processor", ""),
                 ))
 
-        if scenario.get("verify_error_handler") or error_scenario:
-            parts.extend(self._build_error_handler_verify_calls(flow_context))
+        if scenario.get("verify_error_handler"):
+            parts.extend(self._build_error_handler_verify_calls(flow_context, scenario))
         return "\n".join(parts)
 
-    def _build_error_handler_verify_calls(self, flow_context: Dict[str, Any]) -> List[str]:
+    def _build_error_handler_verify_calls(self, flow_context: Dict[str, Any], scenario: Optional[Dict[str, Any]] = None) -> List[str]:
         """Verify side-effect processors that are actually implemented in error handlers."""
         verifiable_processors = {
             "logger",
@@ -503,7 +1141,11 @@ class DeterministicMUnitBuilder:
         }
         parts: List[str] = []
         seen = set()
+        expected_error_type = self._expected_error_type(scenario or {})
         for handler in flow_context.get("error_handler_details", []) or []:
+            handler_type = handler.get("error_type") or handler.get("match_type") or handler.get("type") or ""
+            if handler.get("error_type") and expected_error_type and not self._handler_matches_error_type(handler_type, expected_error_type):
+                continue
             for processor in handler.get("processors", []) or []:
                 processor_type = processor.get("type") or ""
                 if processor_type not in verifiable_processors:
@@ -515,6 +1157,24 @@ class DeterministicMUnitBuilder:
                 seen.add(key)
                 parts.append(self._verify_call_xml(processor_type, doc_name, "doc:name", doc_name))
         return parts
+
+    def _handler_matches_error_type(self, handler_type: str, expected_error_type: str) -> bool:
+        """Return True when an error-handler type declaration can catch expected_error_type."""
+        if not handler_type or handler_type == "ANY":
+            return not handler_type or expected_error_type == "ANY"
+        expected = (expected_error_type or "").strip()
+        for candidate in re.split(r"\s*,\s*", handler_type):
+            candidate = candidate.strip()
+            if candidate == expected:
+                return True
+            if candidate == "ANY":
+                return True
+            if ":" in candidate and ":" in expected:
+                candidate_ns, candidate_id = candidate.split(":", 1)
+                expected_ns, expected_id = expected.split(":", 1)
+                if candidate_ns == expected_ns and candidate_id == expected_id:
+                    return True
+        return False
 
     def _verify_call_xml(self, processor: str, doc_name: str, match_attr: str, match_value: str) -> str:
         return f"""            <munit-tools:verify-call doc:name="Verify {self._xml_escape(doc_name)}" processor="{processor}" times="1">
@@ -529,18 +1189,24 @@ class DeterministicMUnitBuilder:
         scenario: Dict[str, Any],
         resource_folder: str,
         index: int,
+        resource_suffix: str,
         *,
         recorder_style: bool,
         sample_payload: Optional[str],
         connector_samples: Dict[str, Dict[str, str]],
     ) -> Tuple[str, Dict[str, str]]:
         files: Dict[str, str] = {}
-        scenario_type = scenario.get("type", "happy_path")
-        output_fields = flow_context.get("output_fields", []) or []
+        validation_plan = self._validation_plan_for_scenario(
+            flow_context,
+            scenario,
+            sample_payload=sample_payload,
+            connector_samples=connector_samples,
+        )
+        assertions = validation_plan.get("assertions", []) or []
 
-        if scenario_type in {"downstream_failure", "downstream_api_failure", "error_scenario"}:
-            if scenario.get("assertion_strategy") == "error_handler_response":
-                assert_file = f"assert_expression_payload_{index}.dwl"
+        if any(item.get("kind") == "assert-expression" for item in assertions):
+            if scenario.get("type") in {"downstream_failure", "downstream_api_failure", "error_scenario"}:
+                assert_file = f"assert_expression_payload_{resource_suffix}.dwl"
                 files[assert_file] = self._build_assert_module_content(
                     self._expected_error_handler_response(flow_context, scenario)
                 )
@@ -554,37 +1220,16 @@ import {resource_folder}::{module_name}
             </munit-tools:assert>""",
                     files,
                 )
-            return (
-                """            <munit-tools:assert-that
-                doc:name="Assert error type present"
-                expression="#[error.errorType.identifier]"
-                is="#[MunitTools::notNullValue()]"
-                message="Error should be thrown"/>""",
-                files,
+
+            assert_file = f"assert_expression_payload_{resource_suffix}.dwl"
+            assert_dwl = self._build_assert_dwl(
+                flow_context,
+                sample_payload,
+                recorder_style,
+                connector_samples=connector_samples,
+                scenario=scenario,
             )
-
-        if scenario_type in {"empty_payload", "invalid_input", "validation_error"}:
-            expected_type = self._expected_error_type(scenario)
-            return (
-                f"""            <munit-tools:assert-that
-                doc:name="Assert validation error"
-                expression="#[error.errorType.identifier]"
-                is="#[MunitTools::equalTo('{self._xml_escape(expected_type.split(':')[-1])}')]"
-                message="Validation should fail"/>""",
-                files,
-            )
-
-        assert_file = f"assert_expression_payload_{index}.dwl"
-        assert_dwl = self._build_assert_dwl(
-            flow_context,
-            sample_payload,
-            recorder_style,
-            connector_samples=connector_samples,
-            scenario=scenario,
-        )
-        files[assert_file] = assert_dwl
-
-        if recorder_style or len(output_fields) <= 2:
+            files[assert_file] = assert_dwl
             module_name = assert_file.rsplit(".", 1)[0]
             return (
                 f"""            <munit-tools:assert doc:name="Assert payload" message="The payload does not match expected response">
@@ -596,23 +1241,96 @@ import {resource_folder}::{module_name}
                 files,
             )
 
-        # Deterministic mode: at most 3 field checks + optional notNull on payload
-        lines = [
-            """            <munit-tools:assert-that
-                doc:name="Assert payload not null"
-                expression="#[payload]"
-                is="#[MunitTools::notNullValue()]"
-                message="Payload must not be null"/>"""
-        ]
-        for field in output_fields[:3]:
-            lines.append(
-                f"""            <munit-tools:assert-that
-                doc:name="Assert {self._xml_escape(field)} present"
-                expression="#[payload.{field}]"
-                is="#[MunitTools::notNullValue()]"
-                message="Field {self._xml_escape(field)} must be present"/>"""
+        if assertions:
+            expected = self._expected_output_for_validation(
+                flow_context,
+                scenario,
+                sample_payload,
+                connector_samples,
             )
-        return "\n".join(lines), files
+            return "\n".join(
+                self._assert_that_xml(assertion, scenario, expected)
+                for assertion in assertions
+                if assertion.get("kind") == "assert-that"
+            ), files
+
+        return "", files
+
+    def _expected_output_for_validation(
+        self,
+        flow_context: Dict[str, Any],
+        scenario: Dict[str, Any],
+        sample_payload: Optional[str],
+        connector_samples: Dict[str, Dict[str, str]],
+    ) -> Any:
+        if scenario.get("type") == "empty_downstream_response":
+            return self._expected_empty_downstream_output(flow_context, scenario)
+        expected = self._expected_output_from_sample(sample_payload)
+        if expected is not None:
+            return expected
+        return self._expected_output_from_flow(flow_context, connector_samples or {})
+
+    def _assert_that_xml(self, assertion: Dict[str, Any], scenario: Dict[str, Any], expected: Any) -> str:
+        target = assertion.get("target") or "payload"
+        matcher = assertion.get("matcher") or ""
+        doc_name = self._assert_doc_name(assertion, scenario)
+        message = assertion.get("reason") or "Validation failed"
+        is_expr = self._assert_matcher_expression(target, matcher, scenario, expected)
+        return f"""            <munit-tools:assert-that
+                doc:name="{self._xml_escape(doc_name)}"
+                expression="#[{self._xml_escape(target)}]"
+                is="#[{is_expr}]"
+                message="{self._xml_escape(message)}"/>"""
+
+    def _assert_doc_name(self, assertion: Dict[str, Any], scenario: Dict[str, Any]) -> str:
+        target = assertion.get("target") or "payload"
+        if target == "error.errorType.identifier":
+            return "Assert error type"
+        if target.startswith("payload."):
+            return f"Assert {target.split('.', 1)[1]}"
+        if target.startswith("attributes."):
+            return f"Assert {target.split('.', 1)[1]}"
+        return f"Assert {scenario.get('name') or target}"
+
+    def _assert_matcher_expression(
+        self,
+        target: str,
+        matcher: str,
+        scenario: Dict[str, Any],
+        expected: Any,
+    ) -> str:
+        if matcher == "matchesRegex":
+            return "MunitTools::matchesRegex('^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$')"
+        if matcher == "notNullValue":
+            return "MunitTools::notNullValue()"
+        if target == "error.errorType.identifier":
+            expected_type = self._expected_error_type(scenario).split(":")[-1]
+            if scenario.get("type") in {"empty_payload", "invalid_input", "validation_error"}:
+                return f"MunitTools::equalTo('{self._xml_escape(expected_type)}')"
+            return "MunitTools::notNullValue()"
+
+        expected_value = self._expected_value_for_target(target, expected)
+        if expected_value is not None and not isinstance(expected_value, (dict, list)):
+            return f"MunitTools::equalTo({self._dwl_literal(expected_value)})"
+        return "MunitTools::notNullValue()"
+
+    def _expected_value_for_target(self, target: str, expected: Any) -> Any:
+        if target == "payload":
+            return expected
+        if target.startswith("payload.") and isinstance(expected, dict):
+            return self._resolve_path(expected, target.split(".", 1)[1])
+        return None
+
+    def _dwl_literal(self, value: Any) -> str:
+        if isinstance(value, str):
+            return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        if value is True:
+            return "true"
+        if value is False:
+            return "false"
+        if value is None:
+            return "null"
+        return json.dumps(value)
 
     def _build_mock_payload_dwl(
         self,
@@ -705,6 +1423,11 @@ import {resource_folder}::{module_name}
             expected = self._expected_output_from_sample(sample_payload)
         if expected is None:
             expected = self._expected_output_from_flow(flow_context, connector_samples or {})
+        dynamic_fields = self._dynamic_output_fields(flow_context)
+        if isinstance(expected, dict):
+            dynamic_fields.update(self._dynamic_fields_from_expected(expected))
+        if dynamic_fields and isinstance(expected, dict):
+            return self._build_hybrid_assert_module_content(expected, dynamic_fields)
         return self._build_assert_module_content(expected)
 
     def _build_assert_module_content(self, expected: Any) -> str:
@@ -720,7 +1443,91 @@ import {resource_folder}::{module_name}
             "}\n"
         )
 
-    def _split_sample_payload(self, sample_payload: str, plan: Dict[str, Any]) -> Tuple[str, str]:
+    def _build_hybrid_assert_module_content(self, expected: Dict[str, Any], dynamic_fields: Dict[str, str]) -> str:
+        """Build field-level assertions when some response fields are non-deterministic."""
+        lines = [
+            "%dw 2.0",
+            "import * from dw::test::Asserts",
+            "fun main(vars: Object) = do {",
+            "  var payload = vars.payload",
+            "  ---",
+            "  [",
+        ]
+        checks: List[str] = []
+        for field, value in expected.items():
+            field_ref = f"payload.{field}"
+            if field in dynamic_fields:
+                reason = dynamic_fields[field]
+                if reason == "uuid":
+                    checks.append(
+                        f"    ({field_ref} as String) must match(/^([0-9a-fA-F]{{8}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{12}})$/)"
+                    )
+                else:
+                    checks.append(f"    {field_ref} must notNullValue()")
+                continue
+            expected_literal = json.dumps(value)
+            checks.append(f"    {field_ref} must equalTo({expected_literal})")
+
+        if not checks:
+            checks.append("    payload must notNullValue()")
+        lines.append(",\n".join(checks))
+        lines.extend([
+            "  ]",
+            "}\n",
+        ])
+        return "\n".join(lines)
+
+    def _dynamic_output_fields(self, flow_context: Dict[str, Any]) -> Dict[str, str]:
+        """Return output fields generated from runtime-unstable expressions."""
+        script = self._final_transform_script(flow_context)
+        if not script:
+            return {}
+        body = script.split("---", 1)[1] if "---" in script else script
+        dynamic: Dict[str, str] = {}
+        for field, expression in self._parse_dwl_object_fields(body):
+            if field in {"output", "ns", "import"}:
+                continue
+            reason = self._dynamic_expression_reason(field, expression)
+            if reason:
+                dynamic[field] = reason
+        return dynamic
+
+    def _dynamic_fields_from_expected(self, expected: Dict[str, Any]) -> Dict[str, str]:
+        """Treat runtime-shaped sample fields as flexible even without DWL context."""
+        dynamic: Dict[str, str] = {}
+        for field, value in expected.items():
+            reason = self._dynamic_expression_reason(field, str(value))
+            if reason:
+                dynamic[field] = reason
+        return dynamic
+
+    def _dynamic_expression_reason(self, field: str, expression: str) -> str:
+        """Classify expressions whose result should not be exact-equality asserted."""
+        text = (expression or "").lower()
+        field_lower = (field or "").lower()
+        if re.search(r"\buuid\s*\(", text):
+            return "uuid"
+        if re.search(r"\b(?:now|currentdatetime|currentdate|currenttime)\s*\(", text):
+            return "datetime"
+        if re.search(r"\b(?:random|randomint|randomuuid)\s*\(", text):
+            return "random"
+        if any(token in text for token in ("correlationid", "event.id", "message.id")):
+            return "runtime-id"
+        if "${secure::" in text or "secure::" in text:
+            return "secret"
+        if re.search(r"\$\{[^}]+\}", text):
+            return "property"
+        if any(token in field_lower for token in ("uuid", "correlation", "timestamp", "datetime", "date", "token", "secret", "nonce", "otp")):
+            return "dynamic-field"
+        return ""
+
+    def _split_sample_payload(
+        self,
+        sample_payload: str,
+        plan: Dict[str, Any],
+        *,
+        scenario: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, str]:
         """Split user sample into payload + attributes DWL files."""
         text = sample_payload.strip()
         request_obj: Any = {}
@@ -729,18 +1536,39 @@ import {resource_folder}::{module_name}
         try:
             parsed = json.loads(text)
             if isinstance(parsed, dict):
-                request_obj = parsed.get("request", parsed.get("input", {}))
-                response_obj = parsed.get("response", parsed.get("output", parsed))
-                if not request_obj and "queryParams" in parsed:
+                request_obj = (
+                    parsed.get("request")
+                    or parsed.get("input")
+                    or parsed.get("requestPayload")
+                    or parsed.get("inputPayload")
+                    or {}
+                )
+                response_obj = (
+                    parsed.get("response")
+                    or parsed.get("output")
+                    or parsed.get("expectedResponse")
+                    or parsed.get("expected")
+                    or parsed
+                )
+                if not request_obj and any(key in parsed for key in ("payload", "body", "attributes", "headers", "queryParams", "uriParams", "method", "requestPath", "path")):
                     request_obj = parsed
+                elif not request_obj and not any(key in parsed for key in ("response", "output", "expectedResponse", "expected")):
+                    request_obj = {"payload": parsed}
+            elif isinstance(parsed, list):
+                request_obj = {"payload": parsed}
+                response_obj = {}
         except json.JSONDecodeError:
-            request_obj = {}
+            request_obj = {"payload": text}
             response_obj = {"status": "SUCCESS"}
 
         if not request_obj:
             request_obj = {}
 
+        if scenario and scenario.get("type") in {"branch_path", "validation_error", "invalid_input", "empty_payload"}:
+            request_obj = self._apply_scenario_to_sample_request(request_obj, scenario)
+
         payload_obj = self._sample_request_payload(request_obj)
+        payload_obj = self._unwrap_recorder_payload_if_needed(payload_obj)
         payload_dwl = self._build_raw_resource_content(payload_obj)
 
         attrs = json.loads(json.dumps(plan.get("attributes_template") or {
@@ -757,6 +1585,46 @@ import {resource_folder}::{module_name}
         self._last_sample_response = response_obj
         return payload_dwl, attrs_dwl
 
+    def _apply_scenario_to_sample_request(self, request_obj: Any, scenario: Dict[str, Any]) -> Any:
+        """Apply branch/invalid scenario input mutations to a user recorder sample."""
+        if not isinstance(request_obj, dict):
+            return request_obj
+
+        adjusted = json.loads(json.dumps(request_obj))
+        payload_obj = self._sample_request_payload(adjusted)
+        if isinstance(payload_obj, dict):
+            payload_obj = json.loads(json.dumps(payload_obj))
+        else:
+            payload_obj = {}
+
+        condition = scenario.get("branch_condition", "")
+        for source, field, value in self._extract_condition_equalities(condition):
+            if source == "attributes.queryParams":
+                adjusted.setdefault("queryParams", {})[field] = value
+            elif source == "attributes.headers":
+                adjusted.setdefault("headers", {})[field] = value
+            elif source == "attributes.uriParams":
+                adjusted.setdefault("uriParams", {})[field] = value
+            elif source == "payload":
+                payload_obj[field] = value
+
+        for field in self._payload_null_fields_for_condition(condition):
+            payload_obj.pop(field, None)
+        for field, value in self._payload_overrides_for_condition(condition).items():
+            payload_obj[field] = value
+
+        if scenario.get("type") == "empty_payload":
+            payload_obj = ""
+        elif scenario.get("type") in {"validation_error", "invalid_input"} and not scenario.get("terminates_with_error"):
+            if payload_obj:
+                first_key = next(iter(payload_obj))
+                payload_obj.pop(first_key, None)
+            else:
+                payload_obj = {}
+
+        adjusted["payload"] = payload_obj
+        return adjusted
+
     def _sample_request_payload(self, request_obj: Any) -> Any:
         """Return the request body portion from a recorder-style sample."""
         if not isinstance(request_obj, dict):
@@ -771,6 +1639,43 @@ import {resource_folder}::{module_name}
         if request_obj and all(key in attribute_keys for key in request_obj):
             return {}
         return request_obj
+
+    def _unwrap_recorder_payload_if_needed(self, payload_obj: Any) -> Any:
+        """Prevent the full recorder sample wrapper from being written as set-event payload."""
+        if not isinstance(payload_obj, dict):
+            return payload_obj
+        if "request" in payload_obj or "input" in payload_obj:
+            request_obj = payload_obj.get("request") or payload_obj.get("input") or {}
+            return self._sample_request_payload(request_obj)
+        if "payload" in payload_obj and any(
+            key in payload_obj for key in ("response", "output", "expectedResponse", "expected")
+        ):
+            return payload_obj.get("payload")
+        return payload_obj
+
+    def _sanitize_set_event_payload_resource_content(self, content: str) -> str:
+        """Last-resort guard: set-event payload resources must contain only request payload."""
+        text = (content or "").strip()
+        if not text:
+            return content
+
+        parsed: Any
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return content
+
+        # Handle doubly encoded JSON strings defensively.
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed)
+            except json.JSONDecodeError:
+                return content
+
+        unwrapped = self._unwrap_recorder_payload_if_needed(parsed)
+        if unwrapped is parsed:
+            return content
+        return self._build_raw_resource_content(unwrapped)
 
     def _merge_sample_request_attributes(self, attrs: Dict[str, Any], request_obj: Any) -> None:
         """Merge request attributes from user samples into the set-event attributes."""
@@ -990,13 +1895,116 @@ import {resource_folder}::{module_name}
         sample_context: Dict[str, Any],
     ) -> Dict[str, Any]:
         expected: Dict[str, Any] = {}
-        for match in re.finditer(r'^\s*"?([A-Za-z_][\w-]*)"?\s*:\s*(.+?)\s*,?\s*$', body, re.MULTILINE):
-            key = match.group(1)
-            expression = match.group(2).strip()
+        for key, expression in self._parse_dwl_object_fields(body):
             if key in {"output", "ns", "import"}:
                 continue
             expected[key] = self._value_from_dwl_expression(expression, key, sample_context)
         return expected
+
+    def _parse_dwl_object_fields(self, body: str) -> List[Tuple[str, str]]:
+        """Parse top-level fields from a DWL object body, preserving nested expressions."""
+        object_body = self._unwrap_dwl_collection(body, "{", "}")
+        if object_body is None:
+            return []
+
+        fields: List[Tuple[str, str]] = []
+        for part in self._split_top_level(object_body, ","):
+            if ":" not in part:
+                continue
+            key, expression = self._split_key_value(part)
+            if not key:
+                continue
+            fields.append((key, expression.strip()))
+        return fields
+
+    def _split_key_value(self, text: str) -> Tuple[str, str]:
+        """Split a DWL object field at the first top-level colon."""
+        depth = 0
+        quote = ""
+        escape = False
+        for index, char in enumerate(text):
+            if quote:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in {"'", '"'}:
+                quote = char
+                continue
+            if char in "{[(":
+                depth += 1
+            elif char in "}])" and depth > 0:
+                depth -= 1
+            elif char == ":" and depth == 0:
+                key = text[:index].strip().strip("'\"")
+                return key, text[index + 1:]
+        return "", text
+
+    def _unwrap_dwl_collection(self, text: str, open_char: str, close_char: str) -> Optional[str]:
+        """Return content inside the first balanced top-level DWL collection."""
+        candidate = (text or "").strip().rstrip(",")
+        start = candidate.find(open_char)
+        if start < 0:
+            return None
+        depth = 0
+        quote = ""
+        escape = False
+        for index in range(start, len(candidate)):
+            char = candidate[index]
+            if quote:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in {"'", '"'}:
+                quote = char
+                continue
+            if char == open_char:
+                depth += 1
+            elif char == close_char:
+                depth -= 1
+                if depth == 0:
+                    return candidate[start + 1:index]
+        return None
+
+    def _split_top_level(self, text: str, delimiter: str) -> List[str]:
+        """Split text by delimiter while ignoring nested braces, brackets, parens, and strings."""
+        parts: List[str] = []
+        start = 0
+        depth = 0
+        quote = ""
+        escape = False
+        for index, char in enumerate(text or ""):
+            if quote:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in {"'", '"'}:
+                quote = char
+                continue
+            if char in "{[(":
+                depth += 1
+            elif char in "}])" and depth > 0:
+                depth -= 1
+            elif char == delimiter and depth == 0:
+                part = text[start:index].strip()
+                if part:
+                    parts.append(part)
+                start = index + 1
+        tail = (text or "")[start:].strip()
+        if tail:
+            parts.append(tail)
+        return parts
 
     def _value_from_dwl_expression(
         self,
@@ -1005,6 +2013,24 @@ import {resource_folder}::{module_name}
         sample_context: Dict[str, Any],
     ) -> Any:
         expression = expression.strip().rstrip(",")
+        if expression.startswith("(") and expression.endswith(")"):
+            expression = expression[1:-1].strip()
+
+        if expression.startswith("{"):
+            return self._expected_object_from_dwl_body(expression, sample_context)
+
+        if expression.startswith("["):
+            array_body = self._unwrap_dwl_collection(expression, "[", "]")
+            if array_body is not None:
+                return [
+                    self._value_from_dwl_expression(item, output_field, sample_context)
+                    for item in self._split_top_level(array_body, ",")
+                ]
+
+        if_match = re.match(r"if\s*\((.*?)\)\s*(.*?)\s+else\s+(.*)$", expression, re.DOTALL)
+        if if_match:
+            return self._value_from_dwl_expression(if_match.group(2).strip(), output_field, sample_context)
+
         literal = self._parse_literal_expression(expression)
         if literal is not None:
             return literal
@@ -1190,24 +2216,27 @@ import {resource_folder}::{module_name}
                 cursor = cursor[segment]
 
     def _mock_value_for_field(self, field: str) -> Any:
-        lowered = field.lower()
-        if lowered in {"country", "name"}:
-            return "India" if lowered == "country" else "Test Record"
-        if lowered.endswith("id") or lowered == "id":
-            return "MOCK-001"
-        if lowered == "email":
-            return "test@example.com"
-        if lowered == "status":
-            return "ACTIVE"
-        if lowered in {"states", "items", "records", "results"}:
-            return [{"name": "Sample", "state_code": "XX"}]
-        return "MOCK-VALUE"
+        return _mock_value_for_field_static(field)
+
+    def _expected_type_for_field(self, field: str) -> str:
+        value = self._mock_value_for_field(field)
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, (int, float)):
+            return "number"
+        if isinstance(value, list):
+            return "array"
+        if isinstance(value, dict):
+            return "object"
+        return "string"
 
     def _error_type_for_processor(self, processor: str) -> str:
         if processor.startswith("db:"):
             return "DB:CONNECTIVITY"
         if processor.startswith("salesforce:"):
             return "SALESFORCE:CONNECTIVITY"
+        if processor.startswith("sap:"):
+            return "SAP:CONNECTIVITY"
         if processor.startswith("file:"):
             return "FILE:ILLEGAL_PATH"
         if processor.startswith("sftp:"):
@@ -1249,8 +2278,12 @@ import {resource_folder}::{module_name}
                 attrs.setdefault("uriParams", {})[field] = value
             elif source == "payload":
                 payload_obj[field] = value
+        for field in self._payload_null_fields_for_condition(condition):
+            payload_obj.pop(field, None)
+        for field, value in self._payload_overrides_for_condition(condition).items():
+            payload_obj[field] = value
 
-        if scenario.get("type") in {"validation_error", "invalid_input"}:
+        if scenario.get("type") in {"validation_error", "invalid_input"} and not scenario.get("terminates_with_error"):
             if payload_obj:
                 first_key = next(iter(payload_obj))
                 payload_obj.pop(first_key, None)
@@ -1263,6 +2296,26 @@ import {resource_folder}::{module_name}
             adjusted["payload_expression"] = json.dumps(payload_obj)
             adjusted["payload_media_type"] = "application/json"
         return adjusted
+
+    def _payload_null_fields_for_condition(self, condition: str) -> List[str]:
+        """Return payload fields that should be absent to satisfy null checks."""
+        return re.findall(r"\bpayload\.([A-Za-z_][A-Za-z0-9_-]*)\s*==\s*null", condition or "")
+
+    def _payload_overrides_for_condition(self, condition: str) -> Dict[str, Any]:
+        """Infer scenario request values from common validation branch conditions."""
+        text = condition or ""
+        overrides: Dict[str, Any] = {}
+        numeric_ranges = re.findall(
+            r"\bpayload\.([A-Za-z_][A-Za-z0-9_-]*)\s*([<>]=?)\s*(-?\d+(?:\.\d+)?)",
+            text,
+        )
+        for field, operator, raw_value in numeric_ranges:
+            value = float(raw_value) if "." in raw_value else int(raw_value)
+            if operator in {">", ">="}:
+                overrides[field] = value + 1
+            elif operator in {"<", "<="} and field not in overrides:
+                overrides[field] = value - 1
+        return overrides
 
     def _extract_condition_equalities(self, condition: str) -> List[Tuple[str, str, Any]]:
         """Parse simple route conditions like attributes.queryParams.kind == 'a'."""
@@ -1404,6 +2457,8 @@ import {resource_folder}::{module_name}
                 "http:request", "db:select", "db:insert", "db:update", "db:delete",
                 "wsc:consume",
                 "salesforce:query", "salesforce:create", "salesforce:update",
+                "salesforce:delete", "salesforce:upsert", "salesforce:retrieve",
+                "sap:synchronous-remote-function-call", "sap:send", "sap:query",
                 "file:read", "sftp:read", "jms:publish-consume", "vm:publish-consume",
                 "objectstore:retrieve",
             }
@@ -1557,6 +2612,27 @@ import {resource_folder}::{module_name}
             clean = "flow"
         return f"{clean}Flowtest"
 
+    def _resource_suffix_for_scenario(self, scenario: Dict[str, Any], index: int) -> str:
+        """Return stable, human-readable suffixes for generated DWL resources."""
+        scenario_type = scenario.get("type") or ""
+        name = scenario.get("name") or scenario_type or f"scenario-{index}"
+
+        if scenario_type == "happy_path" or name in {"happy_path", "valid"}:
+            return "valid"
+        if scenario_type in {"empty_payload", "invalid_input", "validation_error"}:
+            if name in {"validation_error", "invalid_input"}:
+                return "invalid"
+            base = self._slugify(name).replace("-", "_")
+            if not base.startswith("invalid") and base not in {"empty_payload"}:
+                base = f"invalid_{base}"
+            return base or f"invalid_{index}"
+        if scenario_type in {"downstream_failure", "downstream_api_failure", "error_scenario"}:
+            base = self._slugify(name).replace("-", "_")
+            return base or f"error_{index}"
+
+        base = self._slugify(name).replace("-", "_")
+        return base or f"scenario_{index}"
+
     def _slugify(self, value: str) -> str:
         normalized = (value or "flow").replace("_", "-").replace(" ", "-").lower()
         normalized = re.sub(r"[^a-z0-9-]+", "-", normalized)
@@ -1584,6 +2660,13 @@ def _pre_outbound_script_text(processor_chain: List[Dict], inline_dwl: List[Dict
         "db:delete",
         "salesforce:query",
         "salesforce:create",
+        "salesforce:update",
+        "salesforce:delete",
+        "salesforce:upsert",
+        "salesforce:retrieve",
+        "sap:synchronous-remote-function-call",
+        "sap:send",
+        "sap:query",
         "vm:publish",
         "email:send",
         "kafka:publish",
@@ -1674,8 +2757,9 @@ def extract_output_fields(inline_dwl: List[Dict], final_processor: Dict) -> List
     scripts = []
     if final_processor and final_processor.get("dwl_excerpt"):
         scripts.append(final_processor["dwl_excerpt"])
-    for item in inline_dwl or []:
-        scripts.append(item.get("script", ""))
+    else:
+        for item in inline_dwl or []:
+            scripts.append(item.get("script", ""))
     if not scripts:
         return []
 
@@ -1722,13 +2806,56 @@ def _mock_value_for_attribute_static(attribute_group: str, field: str) -> Any:
 
 
 def _mock_value_for_field_static(field: str) -> Any:
-    lowered = field.lower()
-    if lowered == "country":
+    field = field or ""
+    normalized_field = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", field)
+    lowered = re.sub(r"[^a-z0-9]+", "_", normalized_field.lower()).strip("_")
+    tokens = {token for token in lowered.split("_") if token}
+    compact = lowered.replace("_", "")
+
+    if lowered in {"country", "country_name"}:
         return "India"
-    if lowered.endswith("id"):
+    if lowered in {"latitude", "lat"}:
+        return 26.889278
+    if lowered in {"longitude", "lon", "lng"}:
+        return 75.83149
+    if lowered in {"city", "city_name"}:
+        return "Jaipur"
+    if lowered in {"unit", "units", "temperature_unit"}:
+        return "celsius"
+    if lowered in {"name", "full_name", "customer_name", "account_name"} or lowered.endswith("_name"):
+        return "Test Record"
+    if lowered in {"first_name", "firstname"}:
+        return "Test"
+    if lowered in {"last_name", "lastname", "surname"}:
+        return "User"
+    if lowered.endswith("id") or lowered.endswith("_id") or lowered == "id" or compact.endswith("id"):
         return "MOCK-001"
-    if lowered == "email":
+    if lowered in {"email", "email_address"} or "email" in tokens:
         return "test@example.com"
+    if lowered in {"status", "state"}:
+        return "ACTIVE"
+    if lowered in {"type", "category"}:
+        return "STANDARD"
+    if lowered in {"code", "state_code", "country_code"} or lowered.endswith("_code"):
+        return "TEST-CODE"
+    if "currency" in tokens:
+        return "USD"
+    if "phone" in tokens or "mobile" in tokens:
+        return "+911234567890"
+    if "postal" in tokens or lowered in {"zip", "zipcode", "zip_code"}:
+        return "560001"
+    if "date" in tokens or lowered.endswith("_date"):
+        return "2026-01-01"
+    if "time" in tokens or "timestamp" in tokens or lowered.endswith("_time"):
+        return "2026-01-01T00:00:00Z"
+    if lowered.startswith("is_") or lowered.startswith("has_") or tokens & {"active", "enabled", "disabled", "valid", "flag"}:
+        return True
+    if tokens & {"count", "number", "num", "qty", "quantity", "age", "limit", "offset", "page", "size", "score", "duration"}:
+        return 1
+    if tokens & {"amount", "price", "total", "rate", "balance", "cost", "fee", "tax"}:
+        return 100.0
+    if lowered in {"states", "items", "records", "results"}:
+        return [{"name": "Sample", "state_code": "XX"}]
     return "MOCK-VALUE"
 
 

@@ -13,11 +13,13 @@ import json
 import re
 import tempfile
 import logging
+import hashlib
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
+import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, flash
 from werkzeug.utils import secure_filename
 import threading
@@ -55,6 +57,7 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # Mule project ZIPs are of
 # Global variables for job tracking
 active_jobs = {}
 job_results = {}
+analysis_cache = {}
 
 class WebMUnitGenerator:
     """
@@ -101,7 +104,7 @@ class WebMUnitGenerator:
         self.prompt_builder = PromptBuilder(max_tokens=self.config.max_prompt_tokens)
         self.ruleset_loader = RulesetLoader()
         self.llm_router = LLMRouter(timeout=self.config.llm_timeout)
-        self.munit_writer = MUnitWriter(output_dir='./output/')
+        self.munit_writer = MUnitWriter(output_dir=self.config.output_path)
         
         # Security and token tracking
         self.security_sanitizer = SecuritySanitizer()
@@ -114,12 +117,37 @@ class WebMUnitGenerator:
         # Blueprint pipeline (Steps 3-8) — wired to the same LLM router
         self.blueprint_pipeline = BlueprintPipeline(
             llm_caller=lambda prompt: self.llm_router.generate_raw(prompt),
-            output_dir='./output/',
+            output_dir=self.config.output_path,
         )
         self.deterministic_builder = DeterministicMUnitBuilder(output_dir=self.config.output_path)
         self.semantic_validator = MUnitSemanticValidator()
         
         logger.info(f"WebMUnitGenerator initialized with token budget: {token_budget}")
+
+    def _configure_output_for_job(self, job_id: str, params: dict) -> str:
+        """Resolve and apply a per-job output directory outside the app by default."""
+        requested = (params.get("output_path") or "").strip()
+        in_app_defaults = {"", "./output", "./output/", "output", "output/"}
+        if requested in in_app_defaults:
+            output_path = os.path.join(tempfile.gettempdir(), "munit-generation-agent-output", job_id)
+        elif os.path.isabs(os.path.expanduser(requested)) or requested.startswith("~"):
+            output_path = os.path.abspath(os.path.expanduser(requested))
+        else:
+            output_path = os.path.abspath(
+                os.path.join(tempfile.gettempdir(), "munit-generation-agent-output", requested)
+            )
+
+        params["output_path"] = output_path
+        self.config.output_path = output_path
+        self.munit_writer = MUnitWriter(output_dir=output_path)
+        self.deterministic_builder = DeterministicMUnitBuilder(output_dir=output_path)
+        self.blueprint_pipeline.output_dir = Path(output_path)
+        if hasattr(self.blueprint_pipeline, "_mock_payload_dir"):
+            self.blueprint_pipeline._mock_payload_dir = (
+                Path(output_path) / "src" / "test" / "resources" / "mock_payloads"
+            )
+            self.blueprint_pipeline._mock_payload_dir.mkdir(parents=True, exist_ok=True)
+        return output_path
     
     def generate_munit_web(self, job_id: str, params: dict) -> dict:
         """
@@ -135,6 +163,7 @@ class WebMUnitGenerator:
         try:
             # Update job status
             active_jobs[job_id] = {'status': 'processing', 'progress': 0, 'message': 'Starting generation...'}
+            output_path = self._configure_output_for_job(job_id, params)
             
             # Step 1: Fetch Mule XML
             active_jobs[job_id].update({'progress': 10, 'message': 'Fetching Mule XML...'})
@@ -157,6 +186,7 @@ class WebMUnitGenerator:
                 except Exception:
                     selected_flows = [selected_flows]
             flow_summary = self.apply_selected_flows(flow_summary, selected_flows)
+            flow_summary = self._apply_user_dynamic_flow_targets(flow_summary, params)
             
             # Step 3: Fetch business use case
             active_jobs[job_id].update({'progress': 30, 'message': 'Fetching business use case...'})
@@ -176,12 +206,29 @@ class WebMUnitGenerator:
             target_munit_version = (params.get("target_munit_version") or "").strip() or None
             if not target_munit_version:
                 target_munit_version = (params.get("build_validation", {}) or {}).get("munit_version")
+            sample_payloads = self._build_sample_payloads_dict(params)
+            connector_samples = self._build_connector_samples_dict(params)
+            clarification_requests = self._collect_generation_clarification_requests(
+                flow_summary,
+                scenario_map,
+                scenarios,
+                sample_payloads=sample_payloads,
+                connector_samples=connector_samples,
+                generation_mode=params.get("generation_mode"),
+            )
+            if clarification_requests and not self._allow_synthetic_defaults(params):
+                return self._needs_user_input_result(
+                    job_id,
+                    flow_summary,
+                    clarification_requests,
+                    output_path=output_path,
+                )
             generation_outputs = self._generate_targeted_munits(
                 flow_summary,
                 scenario_map,
                 scenarios,
-                sample_payloads=self._build_sample_payloads_dict(params),
-                connector_samples=self._build_connector_samples_dict(params),
+                sample_payloads=sample_payloads,
+                connector_samples=connector_samples,
                 target_munit_version=target_munit_version,
                 generation_mode=params.get("generation_mode"),
             )
@@ -193,7 +240,7 @@ class WebMUnitGenerator:
             output_file = output_files[0] if output_files else None
             
             # Step 8: Complete
-            active_jobs[job_id].update({'progress': 100, 'message': 'Generation complete!'})
+            active_jobs[job_id].update({'status': 'complete', 'progress': 100, 'message': 'Generation complete!'})
             
             # Prepare results with token usage
             token_usage = self.token_budget.get_usage_summary()
@@ -201,6 +248,7 @@ class WebMUnitGenerator:
                 'success': True,
                 'output_file': output_file,
                 'output_files': output_files,
+                'output_path': output_path,
                 'flow_outputs': generation_outputs,
                 'flow_summary': flow_summary,
                 'build_validation': params.get('build_validation', {}),
@@ -214,6 +262,7 @@ class WebMUnitGenerator:
             }
             
             job_results[job_id] = results
+            active_jobs[job_id]['result'] = results
             return results
             
         except Exception as e:
@@ -349,6 +398,7 @@ class WebMUnitGenerator:
     def _generate_legacy_mode(self, job_id: str, params: dict, enhanced: bool = False) -> dict:
         """Generate using legacy mode"""
         try:
+            output_path = self._configure_output_for_job(job_id, params)
             # Step 1: Validate and get Mule XML content
             active_jobs[job_id].update({'progress': 10, 'message': 'Validating Mule XML...'})
             
@@ -367,8 +417,13 @@ class WebMUnitGenerator:
             print(f"DEBUG: XML content length: {len(xml_content)} characters")
             print(f"DEBUG: XML content starts with: {repr(xml_content[:100])}")
             
-            print("DEBUG: Analyzing Mule project content using project-aware XML analyzer")
-            flow_summary = self.xml_analyzer.analyze_mule_project(xml_content)
+            cached_flow_summary = params.get("_cached_flow_summary")
+            if cached_flow_summary:
+                print("DEBUG: Using cached flow analysis for generation")
+                flow_summary = cached_flow_summary
+            else:
+                print("DEBUG: Analyzing Mule project content using project-aware XML analyzer")
+                flow_summary = self.xml_analyzer.analyze_mule_project(xml_content)
             selected_flows = params.get('selected_flows') or []
             if isinstance(selected_flows, str):
                 try:
@@ -376,6 +431,7 @@ class WebMUnitGenerator:
                 except Exception:
                     selected_flows = [selected_flows]
             flow_summary = self.apply_selected_flows(flow_summary, selected_flows)
+            flow_summary = self._apply_user_dynamic_flow_targets(flow_summary, params)
             
             # Step 3: Get business use case content
             active_jobs[job_id].update({'progress': 30, 'message': 'Processing documentation...'})
@@ -400,12 +456,30 @@ class WebMUnitGenerator:
             target_munit_version = (params.get("target_munit_version") or "").strip() or None
             if not target_munit_version:
                 target_munit_version = (params.get("build_validation", {}) or {}).get("munit_version")
+            sample_payloads = self._build_sample_payloads_dict(params)
+            connector_samples = self._build_connector_samples_dict(params)
+            clarification_requests = self._collect_generation_clarification_requests(
+                flow_summary,
+                scenario_map,
+                scenarios,
+                sample_payloads=sample_payloads,
+                connector_samples=connector_samples,
+                generation_mode=params.get("generation_mode"),
+            )
+            if clarification_requests and not self._allow_synthetic_defaults(params):
+                return self._needs_user_input_result(
+                    job_id,
+                    flow_summary,
+                    clarification_requests,
+                    output_path=output_path,
+                    mode='enhanced' if enhanced else 'legacy',
+                )
             generation_outputs = self._generate_targeted_munits(
                 flow_summary,
                 scenario_map,
                 scenarios,
-                sample_payloads=self._build_sample_payloads_dict(params),
-                connector_samples=self._build_connector_samples_dict(params),
+                sample_payloads=sample_payloads,
+                connector_samples=connector_samples,
                 target_munit_version=target_munit_version,
                 generation_mode=params.get("generation_mode"),
             )
@@ -417,7 +491,7 @@ class WebMUnitGenerator:
             output_file = output_files[0] if output_files else None
             
             # Step 8: Complete
-            active_jobs[job_id].update({'progress': 100, 'message': 'Generation complete!'})
+            active_jobs[job_id].update({'status': 'complete', 'progress': 100, 'message': 'Generation complete!'})
             
             # Prepare results with token usage
             token_usage = self.token_budget.get_usage_summary()
@@ -426,6 +500,7 @@ class WebMUnitGenerator:
                 'mode': 'enhanced' if enhanced else 'legacy',
                 'output_file': output_file,
                 'output_files': output_files,
+                'output_path': output_path,
                 'flow_outputs': generation_outputs,
                 'flow_summary': flow_summary,
                 'build_validation': params.get('build_validation', {}),
@@ -447,6 +522,7 @@ class WebMUnitGenerator:
                 }
             
             job_results[job_id] = results
+            active_jobs[job_id]['result'] = results
             return results
             
         except Exception as e:
@@ -656,7 +732,7 @@ class WebMUnitGenerator:
                     flow_context,
                     generation_mode=mode,
                     sample_payload=sample_payload,
-                    connector_samples=connector_samples.get(target_flow, {}),
+                    connector_samples=self._connector_samples_for_flow(connector_samples, target_flow),
                     scenarios=target_scenarios,
                     target_munit_version=target_munit_version,
                 )
@@ -736,6 +812,7 @@ class WebMUnitGenerator:
                 "target_flow": target_flow,
                 "output_file": output_file,
                 "extra_files": extra_files,
+                "munit_xml": munit_xml,
                 "scenarios": target_scenarios,
                 "metadata": metadata
             })
@@ -747,6 +824,116 @@ class WebMUnitGenerator:
             logger.info(f"  {suggestion}")
 
         return outputs
+
+    def _collect_generation_clarification_requests(
+        self,
+        flow_summary: dict,
+        scenario_map: dict,
+        document_context: dict = None,
+        *,
+        sample_payloads: Optional[dict] = None,
+        connector_samples: Optional[dict] = None,
+        generation_mode: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Collect user input needed before writing weak synthetic MUnit assets."""
+        sample_payloads = sample_payloads or {}
+        connector_samples = connector_samples or {}
+        resolved_mode = self._resolve_generation_mode(generation_mode, sample_payloads)
+        requests: List[Dict[str, Any]] = []
+        seen = set()
+        test_targets = self._dedupe_preserve_order(
+            flow_summary.get("test_targets") or flow_summary.get("flows") or ["main-flow"]
+        )
+        flow_contexts = flow_summary.get("flow_contexts", {}) or {}
+
+        for target_flow in test_targets:
+            flow_context = dict(flow_contexts.get(target_flow, {"target_flow": target_flow}))
+            target_scenarios = scenario_map.get(target_flow) or []
+            flow_context["scenarios"] = target_scenarios
+            sample_payload = sample_payloads.get(target_flow) or sample_payloads.get("_all") or None
+            scenarios = self.deterministic_builder._build_scenario_plan(
+                flow_context,
+                scenarios=target_scenarios or None,
+                generation_mode=resolved_mode,
+            )
+            plan = self.deterministic_builder._build_munit_plan(
+                flow_context,
+                scenarios,
+                generation_mode=resolved_mode,
+                sample_payload=sample_payload,
+                connector_samples=self._connector_samples_for_flow(connector_samples, target_flow),
+            )
+            for request_item in plan.get("clarificationRequests", []) or []:
+                item = dict(request_item)
+                item.setdefault("flow", target_flow)
+                key = json.dumps(item, sort_keys=True, default=str)
+                if key in seen:
+                    continue
+                seen.add(key)
+                requests.append(item)
+
+        return requests
+
+    @staticmethod
+    def _connector_samples_for_flow(connector_samples: dict, target_flow: str) -> dict:
+        """Merge shared samples with flow-specific samples for builder lookup."""
+        merged = dict((connector_samples or {}).get("_all", {}) or {})
+        merged.update((connector_samples or {}).get(target_flow, {}) or {})
+        return merged
+
+    def _needs_user_input_result(
+        self,
+        job_id: str,
+        flow_summary: dict,
+        clarification_requests: List[Dict[str, Any]],
+        *,
+        output_path: str,
+        mode: Optional[str] = None,
+    ) -> dict:
+        """Return a paused generation response with safe sample-data prompts."""
+        active_jobs[job_id] = {
+            'status': 'needs_user_input',
+            'progress': 45,
+            'message': 'Additional synthetic sample values are required before MUnit generation.',
+        }
+        result = {
+            'success': False,
+            'needs_user_input': True,
+            'message': 'Provide synthetic or masked values for the requested fields, then rerun generation.',
+            'clarification_requests': clarification_requests,
+            'flow_summary': flow_summary,
+            'selection': self.build_flow_selection_payload(flow_summary),
+            'output_path': output_path,
+            'security': {
+                'sanitized': True,
+                'warnings': [
+                    'Use only synthetic or masked test data.',
+                    'Do not provide production PII, credentials, access tokens, or secrets.',
+                ],
+            },
+        }
+        if mode:
+            result['mode'] = mode
+        job_results[job_id] = result
+        active_jobs[job_id]['result'] = result
+        return result
+
+    @staticmethod
+    def _allow_synthetic_defaults(params: dict) -> bool:
+        """Return true only when the caller explicitly accepts placeholder defaults."""
+        for key in (
+            "allow_synthetic_defaults",
+            "use_synthetic_defaults",
+            "confirm_synthetic_defaults",
+            "skip_clarification_gate",
+        ):
+            value = params.get(key)
+            if isinstance(value, bool):
+                if value:
+                    return True
+            elif isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "y", "on"}:
+                return True
+        return False
 
     @staticmethod
     def _dedupe_preserve_order(values: list) -> list:
@@ -1439,8 +1626,13 @@ class WebMUnitGenerator:
         if not selected_flows:
             return flow_summary
 
+        flow_graph = flow_summary.get("flow_graph", {}) or {}
+        existing_contexts = flow_summary.get("flow_contexts", {}) or {}
         selected = self._dedupe_preserve_order(
-            [flow for flow in selected_flows if flow in (flow_summary.get("flow_contexts", {}) or {})]
+            [
+                flow for flow in selected_flows
+                if flow in flow_graph or flow in existing_contexts
+            ]
         )
         if not selected:
             return flow_summary
@@ -1448,7 +1640,159 @@ class WebMUnitGenerator:
         filtered_summary = dict(flow_summary)
         filtered_summary["test_targets"] = selected
         filtered_summary["selected_flows"] = selected
+        if flow_graph:
+            rebuilt_contexts = self.xml_analyzer._build_flow_contexts(selected, flow_graph)
+            merged_contexts = dict(existing_contexts)
+            merged_contexts.update(rebuilt_contexts)
+            filtered_summary["flow_contexts"] = merged_contexts
         return filtered_summary
+
+    def _apply_user_dynamic_flow_targets(self, flow_summary: dict, params: dict) -> dict:
+        """Apply user-supplied targets for unresolved dynamic flow-ref expressions."""
+        targets = self._build_dynamic_flow_targets_dict(params)
+        if not targets:
+            return flow_summary
+
+        flow_graph = flow_summary.get("flow_graph", {}) or {}
+        if not flow_graph:
+            return flow_summary
+
+        selected = flow_summary.get("test_targets") or flow_summary.get("selected_flows") or []
+        if not selected:
+            selected = flow_summary.get("flows") or []
+
+        known_flows = set(flow_graph.keys())
+        changed = False
+
+        def targets_for(unresolved: dict) -> List[str]:
+            keys = [
+                unresolved.get("expression", ""),
+                unresolved.get("doc_name", ""),
+                unresolved.get("flow", ""),
+                "_all",
+            ]
+            merged: List[str] = []
+            for key in keys:
+                for name in targets.get(key, []) or []:
+                    if name in known_flows and name not in merged:
+                        merged.append(name)
+            return merged
+
+        for target_flow in selected:
+            context = (flow_summary.get("flow_contexts") or {}).get(target_flow, {}) or {}
+            for unresolved in context.get("unresolved_flow_refs", []) or []:
+                resolved_targets = targets_for(unresolved)
+                if not resolved_targets:
+                    continue
+                source_flow = unresolved.get("flow") or target_flow
+                expression = unresolved.get("expression", "")
+                doc_name = unresolved.get("doc_name", "")
+                node = flow_graph.get(source_flow)
+                if not node:
+                    continue
+                for processor in node.get("processor_chain", []) or []:
+                    if processor.get("type") != "flow-ref":
+                        continue
+                    proc_expr = processor.get("name") or processor.get("ref") or processor.get("target") or ""
+                    proc_doc = processor.get("doc_name", "")
+                    if expression and proc_expr != expression:
+                        continue
+                    if doc_name and proc_doc != doc_name:
+                        continue
+                    existing = list(processor.get("dynamic_flow_candidates", []) or [])
+                    merged = self._dedupe_preserve_order(existing + resolved_targets)
+                    processor["dynamic_flow_candidates"] = merged
+                    processor["dynamic"] = True
+                    processor["dynamic_unresolved"] = False
+                    for child in resolved_targets:
+                        if child not in node.get("children", []):
+                            node.setdefault("children", []).append(child)
+                        child_node = flow_graph.get(child)
+                        if child_node is not None and source_flow not in child_node.get("parents", []):
+                            child_node.setdefault("parents", []).append(source_flow)
+                    changed = True
+
+        if not changed:
+            return flow_summary
+
+        updated_summary = dict(flow_summary)
+        updated_summary["flow_graph"] = flow_graph
+        if selected:
+            rebuilt_contexts = self.xml_analyzer._build_flow_contexts(selected, flow_graph)
+            merged_contexts = dict(flow_summary.get("flow_contexts", {}) or {})
+            merged_contexts.update(rebuilt_contexts)
+            updated_summary["flow_contexts"] = merged_contexts
+        return updated_summary
+
+    def _build_dynamic_flow_targets_dict(self, params: dict) -> Dict[str, List[str]]:
+        """Parse user answers for unresolved dynamic flow-ref targets."""
+        raw_values = []
+        ftd = self._build_flow_test_data_dict(params)
+        if ftd.get("dynamicFlowTargets"):
+            raw_values.append(ftd.get("dynamicFlowTargets"))
+        for key in ("dynamic_flow_targets", "dynamicFlowTargets", "flow_ref_targets"):
+            value = params.get(key)
+            if isinstance(value, str) and value.strip():
+                raw_values.append(value.strip())
+
+        targets: Dict[str, List[str]] = {}
+        for raw in raw_values:
+            for key, names in self._parse_dynamic_flow_targets(raw).items():
+                targets.setdefault(key, [])
+                targets[key] = self._dedupe_preserve_order(targets[key] + names)
+        return targets
+
+    def _parse_dynamic_flow_targets(self, raw: str) -> Dict[str, List[str]]:
+        text = (raw or "").strip()
+        if not text:
+            return {}
+
+        def clean_name(value: Any) -> str:
+            return str(value or "").strip().strip("'\"")
+
+        result: Dict[str, List[str]] = {"_all": []}
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    name = clean_name(
+                        item.get("targetFlow")
+                        or item.get("target_flow")
+                        or item.get("flow")
+                        or item.get("name")
+                    )
+                    key = clean_name(item.get("expression") or item.get("doc_name") or item.get("sourceFlow") or "_all") or "_all"
+                else:
+                    name = clean_name(item)
+                    key = "_all"
+                if name:
+                    result.setdefault(key, []).append(name)
+        elif isinstance(parsed, dict):
+            for key, value in parsed.items():
+                names = value if isinstance(value, list) else [value]
+                for name_value in names:
+                    name = clean_name(
+                        (name_value or {}).get("targetFlow")
+                        if isinstance(name_value, dict)
+                        else name_value
+                    )
+                    if name:
+                        result.setdefault(clean_name(key) or "_all", []).append(name)
+        else:
+            for part in re.split(r"[\n,]+", text):
+                name = clean_name(part)
+                if name:
+                    result["_all"].append(name)
+
+        return {
+            key: self._dedupe_preserve_order([name for name in names if name])
+            for key, names in result.items()
+            if names
+        }
 
     def build_flow_selection_payload(self, flow_summary: dict) -> dict:
         """Build UI-friendly flow selection metadata."""
@@ -1457,17 +1801,28 @@ class WebMUnitGenerator:
         flows_payload = []
 
         for flow_name, context in contexts.items():
+            if context.get("direct_munit_excluded"):
+                continue
             is_recommended = flow_name in recommended
             trigger = (context.get("trigger", {}) or {}).get("type", "")
             trigger_name = (context.get("trigger", {}) or {}).get("doc_name", "")
+            munit_plan_preview = self._build_munit_plan_preview(context)
             flows_payload.append({
                 "name": flow_name,
                 "display_name": self._build_flow_display_name(flow_name, trigger, trigger_name),
                 "type": context.get("target_type", "flow"),
                 "source_file": context.get("source_file", "unknown.xml"),
                 "trigger": trigger or "internal",
+                "has_source_listener": bool(context.get("has_source_listener")),
+                "is_parent_flow": bool(context.get("is_parent_flow")),
                 "connectors": context.get("connectors", []),
                 "mock_connectors": self._build_mock_connector_payload(flow_name, context),
+                "mock_connector_count": len([
+                    item for item in (context.get("mock_plan", []) or [])
+                    if item.get("action") == "mock-when"
+                ]),
+                "munit_plan_preview": munit_plan_preview,
+                "clarification_requests": munit_plan_preview.get("clarificationRequests", []),
                 "planned_scenarios": self._build_flow_scenario_preview(context),
                 "assertion_strategy": self._describe_assertion_strategy(context),
                 "branch_points": context.get("branch_points", []),
@@ -1477,40 +1832,181 @@ class WebMUnitGenerator:
                 "parent_flows": context.get("parent_flows", []),
                 "related_flows": context.get("related_flows", []),
                 "execution_flows": context.get("execution_flows", []),
+                "unresolved_flow_refs": context.get("unresolved_flow_refs", []),
                 "recommended": is_recommended,
                 "selection_reason": self._describe_flow_selection_reason(context, is_recommended)
             })
 
-        recommended_flows = [flow for flow in flows_payload if flow["recommended"]]
+        # ── Group flows into three UI categories ─────────────────────────────
+        # Use final flow_context/flow_graph data, not raw flow_details, because
+        # dynamic flow-ref resolution can add parents after initial extraction.
+        categories = {
+            "entry_point": [],
+            "api_resource": [],
+            "unreachable": [],
+            "internal": [],
+        }
+        for flow in flows_payload:
+            name = flow["name"]
+            has_source = flow.get("is_parent_flow") or flow.get("has_source_listener")
+            has_parent = bool(flow.get("parent_flows"))
+            if has_source:
+                categories["entry_point"].append(name)
+            elif self._is_apikit_resource_name(name):
+                categories["api_resource"].append(name)
+            elif has_parent:
+                categories["internal"].append(name)
+            else:
+                categories["unreachable"].append(name)
+
+        payload_by_name = {f["name"]: f for f in flows_payload}
+
+        def _group(names):
+            out = []
+            for n in names:
+                if n in payload_by_name:
+                    out.append(payload_by_name[n])
+            return sorted(out, key=lambda x: x["name"].lower())
+
+        entry_point_flows  = _group(categories["entry_point"])
+        api_resource_flows = _group(categories["api_resource"])
+        unreachable_flows  = _group(categories["unreachable"])
+
+        # Add flow_category field to every flow so the UI can group them
+        for f in entry_point_flows:
+            f["flow_category"] = "entry_point"
+        for f in api_resource_flows:
+            f["flow_category"] = "api_resource"
+        for f in unreachable_flows:
+            f["flow_category"] = "unreachable"
+
+        recommended_flows = [f for f in flows_payload if f["recommended"]]
         all_flows = sorted(flows_payload, key=lambda item: (not item["recommended"], item["name"].lower()))
 
         return {
-            "job_type": flow_summary.get("job_type", "Generic Mule Flow"),
-            "recommended_flows": recommended_flows,
-            "all_flows": all_flows
+            "job_type":           flow_summary.get("job_type", "Generic Mule Flow"),
+            "entry_point_flows":  entry_point_flows,
+            "api_resource_flows": api_resource_flows,
+            "unreachable_flows":  unreachable_flows,
+            # Keep legacy keys so other parts of the app still work
+            "recommended_flows":  recommended_flows,
+            "parent_flows":       entry_point_flows,
+            "listener_flows":     entry_point_flows,
+            "all_flows":          all_flows,
         }
 
+    def _is_apikit_resource_name(self, flow_name: str) -> bool:
+        import re
+        n = (flow_name or "").lower()
+        return bool(re.match(r'^(get|post|put|patch|delete|head|options)[:\\\\\/]', n))
+
     def _build_mock_connector_payload(self, flow_name: str, context: dict) -> list:
-        """Return UI-friendly outbound connector sample prompts for a flow."""
+        """
+        Return UI-friendly connector sample prompts for a flow and ALL its
+        descendant flows (full call chain: A→B→C→D→E/F).
+
+        Uses traversal_connectors (from _traverse_flow_graph) which walks the
+        complete call tree. Falls back to mock_plan (single-flow) if traversal
+        data is not available.
+        """
         connectors = []
+        seen_keys = set()
+
+        # ── Primary: use traversal connectors (deep, covers all child flows) ──
+        traversal = context.get("traversal_connectors") or []
+        if traversal:
+            for item in traversal:
+                processor = item.get("connector", "")
+                if not processor or processor == "flow-ref":
+                    continue
+                action = self._classify_mock_action(processor)
+                if action not in ("mock-when", "spy"):
+                    continue
+                source_flow = item.get("flow", flow_name)
+                doc_name    = item.get("doc_name") or item.get("operation") or processor
+                key = f"{processor}::{source_flow}::{doc_name}"
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                connectors.append({
+                    "id":              self._connector_sample_key(flow_name, {
+                                           "processor": processor,
+                                           "match_value": doc_name,
+                                       }),
+                    "flow":            source_flow,
+                    "source_flow":     source_flow,
+                    "depth":           item.get("level", 0),
+                    "processor":       processor,
+                    "doc_name":        doc_name,
+                    "match_attribute": "doc:name",
+                    "match_value":     doc_name,
+                    "media_type":      item.get("media_type", "application/json"),
+                    "result_shape":    "object",
+                    "display_name":    f"{doc_name} ({processor})" + (
+                                           f" — in {source_flow}" if source_flow != flow_name else ""
+                                       ),
+                    "action":          action,
+                    "position":        len(connectors) + 1,
+                })
+            return connectors
+
+        # ── Fallback: mock_plan from single-flow analysis ─────────────────────
         for index, item in enumerate(context.get("mock_plan", []) or [], start=1):
-            if item.get("action") != "mock-when":
+            if item.get("action") not in ("mock-when", "spy"):
                 continue
             processor = item.get("processor", "connector")
-            doc_name = item.get("doc_name") or item.get("match_value") or processor
+            doc_name  = item.get("doc_name") or item.get("match_value") or processor
+            key = f"{processor}::{flow_name}::{doc_name}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             connectors.append({
-                "id": self._connector_sample_key(flow_name, item),
-                "flow": flow_name,
-                "processor": processor,
-                "doc_name": doc_name,
+                "id":              self._connector_sample_key(flow_name, item),
+                "flow":            flow_name,
+                "source_flow":     flow_name,
+                "depth":           0,
+                "processor":       processor,
+                "doc_name":        doc_name,
                 "match_attribute": item.get("match_attribute", "doc:name"),
-                "match_value": item.get("match_value") or doc_name,
-                "media_type": item.get("media_type", "application/json"),
-                "result_shape": item.get("result_shape", "object"),
-                "display_name": f"{doc_name} ({processor})",
-                "position": index,
+                "match_value":     item.get("match_value") or doc_name,
+                "media_type":      item.get("media_type", "application/json"),
+                "result_shape":    item.get("result_shape", "object"),
+                "display_name":    f"{doc_name} ({processor})",
+                "action":          item.get("action", "mock-when"),
+                "position":        index,
             })
         return connectors
+
+    MOCK_PROCESSORS = {
+        "http:request","wsc:consume",
+        "db:select","db:insert","db:update","db:delete","db:stored-procedure",
+        "salesforce:query","salesforce:create","salesforce:update","salesforce:delete",
+        "salesforce:upsert","salesforce:retrieve",
+        "sap:synchronous-remote-function-call","sap:send",
+        "sftp:read","ftp:read","file:read",
+        "jms:publish-consume","vm:publish-consume",
+        "objectstore:retrieve","objectstore:contains",
+        "servicenow:invoke","workday:invoke","redis:get",
+    }
+    SPY_PROCESSORS = {
+        "anypoint-mq:publish","kafka:publish","amqp:publish","rabbitmq:publish",
+        "jms:publish","vm:publish","email:send",
+        "sftp:write","ftp:write","file:write",
+        "objectstore:store","objectstore:remove",
+    }
+
+    def _classify_mock_action(self, processor_type: str) -> str:
+        p = (processor_type or "").lower().strip()
+        if p in self.MOCK_PROCESSORS:
+            return "mock-when"
+        if p in self.SPY_PROCESSORS:
+            return "spy"
+        # Heuristic fallback
+        if any(x in p for x in ("request","query","select","retrieve","read","get","invoke","consume")):
+            return "mock-when"
+        if any(x in p for x in ("publish","write","send","store","push","emit","produce")):
+            return "spy"
+        return "none"
 
     def _build_flow_scenario_preview(self, context: dict) -> list:
         """Return the backend scenario plan shown before generation."""
@@ -1532,6 +2028,39 @@ class WebMUnitGenerator:
             }
             for item in scenarios
         ]
+
+    def _build_munit_plan_preview(self, context: dict) -> dict:
+        """Return a compact Behavior / Execution / Validation preview for the UI."""
+        scenarios = self.deterministic_builder._build_scenario_plan(
+            context,
+            scenarios=context.get("scenarios") or None,
+            generation_mode="recorder",
+        )
+        plan = self.deterministic_builder._build_munit_plan(
+            context,
+            scenarios,
+            generation_mode="recorder",
+        )
+        return {
+            "execution": plan.get("execution", {}),
+            "behavior": {
+                "mock_count": len((plan.get("behavior") or {}).get("mockWhen", [])),
+                "spy_count": len((plan.get("behavior") or {}).get("spy", [])),
+                "verify_later_count": len((plan.get("behavior") or {}).get("verifyLater", [])),
+            },
+            "validation": [
+                {
+                    "scenario": item.get("scenario"),
+                    "type": item.get("type"),
+                    "assertions": item.get("assertions", []),
+                    "verifications": item.get("verifications", []),
+                    "expectedErrorType": item.get("expectedErrorType"),
+                }
+                for item in (plan.get("validation") or [])[:8]
+            ],
+            "clarificationRequests": (plan.get("clarificationRequests") or [])[:8],
+            "warnings": (plan.get("warnings") or [])[:8],
+        }
 
     def _describe_assertion_strategy(self, context: dict) -> str:
         """Describe how the deterministic builder will validate the final response."""
@@ -1602,6 +2131,7 @@ class WebMUnitGenerator:
                 'progress': 0,
                 'message': 'Blueprint pipeline starting...',
             }
+            output_path = self._configure_output_for_job(job_id, params)
 
             # Validate XML content
             if not params.get('xml_file'):
@@ -1659,6 +2189,7 @@ class WebMUnitGenerator:
                 'output_file': all_output_files[0] if all_output_files else None,
                 'flows_processed': len(flow_results),
                 'build_validation': params.get('build_validation', {}),
+                'output_path': output_path,
                 'pipeline': 'blueprint',
             }
             job_results[job_id] = results
@@ -1673,17 +2204,241 @@ class WebMUnitGenerator:
     def _build_sample_payloads_dict(self, params: dict) -> dict:
         """
         Build a {flow_name: payload_text} dict from request params.
-
-        Kept for backward-compatible API callers. The UI now sends connector
-        samples separately via connector_samples.
+        Now also reads flow_test_data posted from the modal in Step 7.
         """
-        raw = (params.get("sample_payload") or "").strip()
+        samples = self._build_explicit_sample_payloads(params)
+
+        # ── New: flow_test_data from the flow-data modal ──────────────────
+        ftd = self._build_flow_test_data_dict(params)
+        if ftd:
+            payload_text = ftd.get("payload", "")
+            expected_text = ftd.get("expectedResponse", "")
+            combined = {}
+            if payload_text:
+                try:
+                    combined["request"] = json.loads(payload_text)
+                except Exception:
+                    combined["request"] = payload_text
+            if expected_text:
+                try:
+                    combined["response"] = json.loads(expected_text)
+                except Exception:
+                    combined["response"] = expected_text
+            if ftd.get("queryParams"):
+                combined["queryParams"] = ftd["queryParams"]
+            if ftd.get("uriParams"):
+                combined["uriParams"] = ftd["uriParams"]
+            if ftd.get("headers"):
+                combined["headers"] = ftd["headers"]
+            if combined:
+                samples["_all"] = json.dumps(combined, indent=2)
+
+        raw = self._first_non_empty_param(
+            params,
+            "sample_payload",
+            "request_payload",
+            "input_payload",
+            "payload_sample",
+            "request_sample",
+        )
+        if raw and "_all" not in samples:
+            samples["_all"] = self._normalize_recorder_sample_payload(raw)
+        field_samples = self._build_field_value_sample_payloads(params)
+        for flow, sample in field_samples.items():
+            samples.setdefault(flow, sample)
+        if not raw and len(field_samples) == 1 and "_all" not in samples:
+            samples["_all"] = next(iter(field_samples.values()))
+        return samples
+
+    def _build_explicit_sample_payloads(self, params: dict) -> dict:
+        """Build flow-specific recorder samples posted by the clarification UI."""
+        raw = (params.get("sample_payloads") or "").strip()
         if not raw:
             return {}
-        return {"_all": raw}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+
+        samples: Dict[str, str] = {}
+        items = parsed if isinstance(parsed, list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            flow = (item.get("flow") or "_all").strip() or "_all"
+            sample = item.get("sample") or item.get("sample_payload")
+            if sample is None and any(key in item for key in ("request", "payload", "response", "expectedResponse", "output")):
+                request_value = item.get("request")
+                payload_value = item.get("payload")
+                if request_value is None and "payload" in item:
+                    if isinstance(payload_value, dict) and any(
+                        key in payload_value for key in ("request", "input", "response", "output", "expectedResponse", "expected")
+                    ):
+                        sample = payload_value
+                    else:
+                        request_value = {"payload": payload_value}
+                if sample is None:
+                    sample = {
+                        "request": request_value or {},
+                        "response": item.get("response") or item.get("expectedResponse") or item.get("output") or {},
+                    }
+            if isinstance(sample, (dict, list)):
+                sample_text = json.dumps(sample)
+            else:
+                sample_text = str(sample or "").strip()
+            if not sample_text:
+                continue
+            samples[flow] = self._normalize_recorder_sample_payload(sample_text)
+
+        return samples
+
+    @staticmethod
+    def _first_non_empty_param(params: dict, *keys: str) -> str:
+        for key in keys:
+            value = params.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _normalize_recorder_sample_payload(self, raw: str) -> str:
+        """
+        Normalize user-provided request/response samples to the recorder shape.
+
+        The clarification UI asks for a recorder-style JSON object, but users
+        often paste only the request body. Treat a plain object/list/string as
+        request.payload so set-event payload DWLs do not come out empty.
+        """
+        text = (raw or "").strip()
+        if not text:
+            return text
+
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+
+        normalized = self._replace_dynamic_sample_placeholders(parsed)
+        if not isinstance(normalized, dict):
+            return json.dumps({"request": {"payload": normalized}}, indent=2)
+
+        recorder_keys = {
+            "request",
+            "input",
+            "response",
+            "output",
+            "payload",
+            "body",
+            "attributes",
+            "headers",
+            "queryParams",
+            "uriParams",
+            "method",
+            "requestPath",
+            "path",
+        }
+        if any(key in normalized for key in recorder_keys):
+            return json.dumps(normalized, indent=2)
+
+        return json.dumps({"request": {"payload": normalized}}, indent=2)
+
+    def _replace_dynamic_sample_placeholders(self, value: Any) -> Any:
+        """Replace supported safe placeholders inside pasted JSON samples."""
+        if isinstance(value, dict):
+            return {key: self._replace_dynamic_sample_placeholders(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._replace_dynamic_sample_placeholders(item) for item in value]
+        if isinstance(value, str):
+            return self._coerce_user_field_value(value)
+        return value
+
+    def _build_field_value_sample_payloads(self, params: dict) -> dict:
+        """Build recorder-style request samples from user-entered field answers."""
+        raw = (params.get("field_values") or "").strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, list):
+            return {}
+
+        by_flow: Dict[str, Dict[str, Any]] = {}
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            flow = (item.get("flow") or "_all").strip() or "_all"
+            location = (item.get("location") or "payload").strip()
+            field = (item.get("field") or "").strip()
+            if not field:
+                continue
+            value = self._coerce_user_field_value(item.get("value"), item.get("expected_type"), field)
+            request = by_flow.setdefault(flow, {"request": {"payload": {}, "headers": {}, "queryParams": {}, "uriParams": {}}})
+            request_obj = request["request"]
+            if location == "headers":
+                request_obj.setdefault("headers", {})[field] = value
+            elif location == "queryParams":
+                request_obj.setdefault("queryParams", {})[field] = value
+            elif location == "uriParams":
+                request_obj.setdefault("uriParams", {})[field] = value
+            else:
+                request_obj.setdefault("payload", {})[field] = value
+
+        return {
+            flow: self._normalize_recorder_sample_payload(json.dumps(value))
+            for flow, value in by_flow.items()
+        }
+
+    def _coerce_user_field_value(self, value: Any, expected_type: str = "", field: str = "") -> Any:
+        """Convert inline user answers into safe JSON test values."""
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        lowered = text.lower()
+        if lowered in {"{{uuid}}", "${uuid}", "uuid()", "#[uuid()]"}:
+            return "11111111-1111-4111-8111-111111111111"
+        if lowered in {"{{now}}", "{{datetime}}", "${now}", "now()", "#[now()]"}:
+            return "2026-01-01T00:00:00Z"
+        if lowered in {"{{date}}", "${date}", "currentdate()", "#[currentDate()]"}:
+            return "2026-01-01"
+        if lowered in {"{{time}}", "${time}", "currenttime()", "#[currentTime()]"}:
+            return "00:00:00"
+        if lowered in {"{{correlationid}}", "{{correlation_id}}", "${correlationid}"}:
+            return "test-correlation-id"
+        if lowered in {"true", "false"}:
+            return lowered == "true"
+        if lowered in {"null", "{{null}}"}:
+            return None
+        expected = (expected_type or "").lower()
+        if expected == "number":
+            try:
+                return float(text) if "." in text else int(text)
+            except ValueError:
+                return 1
+        if expected == "boolean":
+            return lowered in {"1", "yes", "y", "true", "on"}
+        if expected in {"object", "array"}:
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return {} if expected == "object" else []
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
 
     def _build_connector_samples_dict(self, params: dict) -> dict:
-        """Build {flow: {connector_key: sample}} from connector_samples JSON."""
+        """
+        Build {flow: {connector_key: sample}} from connector_samples JSON.
+
+        Accepts two formats:
+          1. New UI format (dict keyed by 'connectorType__index'):
+             { "http:request__0": { "input": "...", "output": "..." }, ... }
+          2. Legacy list format:
+             [{ "flow": "...", "id": "...", "request": "...", "response": "..." }, ...]
+        """
         raw = (params.get("connector_samples") or "").strip()
         if not raw:
             return {}
@@ -1693,28 +2448,81 @@ class WebMUnitGenerator:
             return {}
 
         samples = {}
+
+        # ── New dict format from Step 6 UI ───────────────────────────────
+        if isinstance(parsed, dict):
+            for key, val in parsed.items():
+                if not isinstance(val, dict):
+                    continue
+                sample_key = (val.get("id") or key).strip()
+                flow = (val.get("flow") or val.get("flowName") or "_all").strip() or "_all"
+                inp = (val.get("input")  or "").strip()
+                out = (val.get("output") or "").strip()
+                if not (inp or out):
+                    continue
+                samples.setdefault(flow, {})[sample_key] = {
+                    "request":    inp,
+                    "response":   out,
+                    "media_type": _detect_media_type(out or inp),
+                }
+            return samples
+
+        # ── Legacy list format ────────────────────────────────────────────
         if not isinstance(parsed, list):
             return samples
 
         for item in parsed:
             if not isinstance(item, dict):
                 continue
-            flow = (item.get("flow") or "").strip()
-            key = (item.get("id") or "").strip()
-            request_text = (item.get("request") or "").strip()
+            flow          = (item.get("flow") or "").strip()
+            key           = (item.get("id")   or "").strip()
+            request_text  = (item.get("request")  or "").strip()
             response_text = (item.get("response") or "").strip()
             if not flow or not key or not (request_text or response_text):
                 continue
             samples.setdefault(flow, {})[key] = {
-                "request": request_text,
-                "response": response_text,
+                "request":    request_text,
+                "response":   response_text,
                 "media_type": item.get("media_type") or "application/json",
             }
         return samples
 
+    def _build_flow_test_data_dict(self, params: dict) -> dict:
+        """
+        Parse flow_test_data from the modal (Step 7 additional data).
+
+        Format: {
+            "payload": "...",
+            "expectedResponse": "...",
+            "statusCode": "200",
+            "queryParams": { "key": "value" },
+            "uriParams":   { "key": "value" },
+            "headers":     { "Authorization": "Bearer ..." },
+        }
+        """
+        raw = (params.get("flow_test_data") or "").strip()
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw) or {}
+        except json.JSONDecodeError:
+            return {}
+
 
 # Initialize generator
 generator = WebMUnitGenerator()
+
+
+def _detect_media_type(text: str) -> str:
+    """Guess media type from sample text."""
+    t = (text or "").strip()
+    if not t:
+        return "application/json"
+    if t.startswith("<"):
+        return "application/xml"
+    if t.startswith("{") or t.startswith("["):
+        return "application/json"
+    return "application/json"
 
 def _extract_project_request_payload(params: dict, files: dict, include_dwl: bool = True, include_usecase: bool = True) -> dict:
     """Read uploaded Mule project inputs into params for analysis or generation."""
@@ -1819,6 +2627,33 @@ def _extract_project_request_payload(params: dict, files: dict, include_dwl: boo
 
     return params
 
+def _prune_analysis_cache(max_entries: int = 12, ttl_seconds: int = 3600) -> None:
+    """Keep short-lived analyzed project context for resume generation."""
+    now = time.time()
+    expired = [
+        key for key, value in analysis_cache.items()
+        if now - float(value.get('created_at', now)) > ttl_seconds
+    ]
+    for key in expired:
+        analysis_cache.pop(key, None)
+    if len(analysis_cache) <= max_entries:
+        return
+    for key, _value in sorted(
+        analysis_cache.items(),
+        key=lambda item: float(item[1].get('created_at', 0)),
+    )[:len(analysis_cache) - max_entries]:
+        analysis_cache.pop(key, None)
+
+def _analysis_fingerprint(params: dict) -> str:
+    """Stable fingerprint for analyzed Mule project content used by resume cache."""
+    digest = hashlib.sha256()
+    digest.update((params.get('xml_file') or '').encode('utf-8', errors='replace'))
+    project_dwl = params.get('project_dwl_files') or {}
+    for path, content in sorted(project_dwl.items()):
+        digest.update(str(path).encode('utf-8', errors='replace'))
+        digest.update(str(content).encode('utf-8', errors='replace'))
+    return digest.hexdigest()
+
 @app.route('/')
 def index():
     """Main application page."""
@@ -1831,7 +2666,7 @@ def generate_enhanced_munit():
         print("DEBUG: Enhanced endpoint called")
         
         # Validate content type
-        if not request.is_json and not request.files:
+        if not request.is_json and not request.files and not request.form:
             print("DEBUG: No files in request")
             return jsonify({
                 'success': False,
@@ -1858,8 +2693,58 @@ def generate_enhanced_munit():
             params["target_munit_version"] = params["target_munit_custom"]
         elif params["target_munit_series"] and params["target_munit_series"] != "custom":
             params["target_munit_version"] = params["target_munit_series"]
-        else:
+        elif not (params.get("target_munit_version") or "").strip():
             params["target_munit_version"] = ""
+
+        analysis_id = (params.get("analysis_id") or "").strip()
+        cached_analysis = analysis_cache.get(analysis_id) if analysis_id else None
+        use_cached_analysis = (params.get("use_cached_analysis") or "").lower() == "true"
+        if use_cached_analysis and not cached_analysis:
+            return jsonify({
+                'success': False,
+                'error': 'Cached flow analysis is no longer available. Please upload or analyze the latest ZIP again.'
+            }), 409
+        if cached_analysis and use_cached_analysis:
+            requested_fingerprint = (params.get("analysis_fingerprint") or "").strip()
+            cached_fingerprint = cached_analysis.get("fingerprint") or ""
+            if requested_fingerprint and requested_fingerprint != cached_fingerprint:
+                return jsonify({
+                    'success': False,
+                    'error': 'Cached flow analysis does not match the current Mule project. Please upload or analyze the latest ZIP again.'
+                }), 409
+            params['xml_file'] = cached_analysis.get('xml_file', '')
+            params['project_dwl_files'] = cached_analysis.get('project_dwl_files', {}) or {}
+            params['build_validation'] = cached_analysis.get('build_validation', {}) or {}
+            params['project_scan'] = cached_analysis.get('project_scan', {}) or {}
+            params['_cached_flow_summary'] = cached_analysis.get('flow_summary')
+            generator._set_project_context({"dwl_files": params['project_dwl_files']})
+            if 'usecase_file' in files and files['usecase_file']:
+                usecase_files = files['usecase_file']
+                if isinstance(usecase_files, list):
+                    combined_content = ""
+                    for file in usecase_files:
+                        if file and hasattr(file, 'filename') and file.filename:
+                            content = generator._read_uploaded_usecase_file(file)
+                            combined_content += f"\n\n--- Content from {file.filename} ---\n{content}\n"
+                    params['usecase_file'] = combined_content
+                else:
+                    if usecase_files and hasattr(usecase_files, 'filename') and usecase_files.filename:
+                        params['usecase_file'] = generator._read_uploaded_usecase_file(usecase_files)
+
+            job_id = f"enhanced_job_{int(time.time())}_{len(active_jobs)}"
+
+            def run_cached_generation():
+                generator.generate_munit_enhanced_web(job_id, params)
+
+            thread = threading.Thread(target=run_cached_generation)
+            thread.daemon = True
+            thread.start()
+
+            return jsonify({
+                'success': True,
+                'job_id': job_id,
+                'message': 'Enhanced generation resumed from cached analysis'
+            })
         
         # Handle XML files or ZIP folder
         xml_files = None
@@ -2113,9 +2998,23 @@ def analyze_enhanced_flows():
 
         flow_summary = generator.xml_analyzer.analyze_mule_project(params['xml_file'])
         selection_payload = generator.build_flow_selection_payload(flow_summary)
+        analysis_id = uuid.uuid4().hex
+        analysis_fingerprint = _analysis_fingerprint(params)
+        analysis_cache[analysis_id] = {
+            'xml_file': params.get('xml_file', ''),
+            'project_dwl_files': params.get('project_dwl_files', {}) or {},
+            'build_validation': params.get('build_validation', {}) or {},
+            'project_scan': params.get('project_scan', {}) or {},
+            'flow_summary': flow_summary,
+            'fingerprint': analysis_fingerprint,
+            'created_at': time.time(),
+        }
+        _prune_analysis_cache()
 
         return jsonify({
             'success': True,
+            'analysis_id': analysis_id,
+            'analysis_fingerprint': analysis_fingerprint,
             'flow_summary': {
                 'job_type': flow_summary.get('job_type'),
                 'flows_count': len(flow_summary.get('flows', [])),
@@ -2409,11 +3308,27 @@ def download_file(job_id):
             
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                used_names = set()
+                output_root = Path(result.get('output_path') or '').resolve() if result.get('output_path') else None
                 for output_file in result['output_files']:
                     if os.path.exists(output_file):
-                        # Add file to ZIP with just the filename
-                        filename = os.path.basename(output_file)
-                        zip_file.write(output_file, filename)
+                        file_path = Path(output_file).resolve()
+                        try:
+                            filename = str(file_path.relative_to(output_root)).replace(os.sep, "/") if output_root else file_path.name
+                        except ValueError:
+                            filename = file_path.name
+                        if filename in used_names:
+                            stem = Path(filename).stem
+                            suffix = Path(filename).suffix
+                            parent = Path(filename).parent
+                            counter = 2
+                            candidate = str(parent / f"{stem}_{counter}{suffix}").replace(os.sep, "/")
+                            while candidate in used_names:
+                                counter += 1
+                                candidate = str(parent / f"{stem}_{counter}{suffix}").replace(os.sep, "/")
+                            filename = candidate
+                        used_names.add(filename)
+                        zip_file.write(file_path, filename)
             
             zip_buffer.seek(0)
             return send_file(
@@ -2626,9 +3541,133 @@ def generate_blueprint_munit():
         }), 500
 
 
+
+# ─── Version compatibility API ────────────────────────────────────────────────
+
+@app.route('/api/munit-versions', methods=['GET'])
+def get_all_munit_versions():
+    """Return the full Runtime → MUnit compatibility matrix used by the UI dropdowns."""
+    try:
+        from core.version_config import get_full_version_map, RUNTIME_VERSIONS
+        return jsonify({
+            'success': True,
+            'runtime_versions': RUNTIME_VERSIONS,
+            'compatibility': get_full_version_map(),
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/munit-versions/<runtime_version>', methods=['GET'])
+def get_munit_versions_for_runtime(runtime_version):
+    try:
+        from core.version_config import (
+            get_munit_versions_for_runtime as _get_versions,
+            get_recommended_munit_version, get_munit_series, get_pom_snippet,
+        )
+        versions = _get_versions(runtime_version)
+        if not versions:
+            return jsonify({'success': False, 'error': f'Unknown runtime: {runtime_version}'}), 404
+        recommended = get_recommended_munit_version(runtime_version)
+        return jsonify({
+            'success': True,
+            'runtime': runtime_version,
+            'series': get_munit_series(runtime_version),
+            'versions': versions,
+            'recommended': recommended,
+            'pom_snippet': get_pom_snippet(recommended or versions[-1], runtime_version),
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/pom-snippet', methods=['POST'])
+def get_pom_snippet_api():
+    try:
+        from core.version_config import get_pom_snippet
+        data = request.get_json() or {}
+        munit_version = data.get('munit_version', '').strip()
+        runtime_version = data.get('runtime_version', '').strip()
+        if not munit_version:
+            return jsonify({'success': False, 'error': 'munit_version is required'}), 400
+        return jsonify({'success': True, 'pom_snippet': get_pom_snippet(munit_version, runtime_version)})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/check-pom', methods=['POST'])
+def check_pom_endpoint():
+    import xml.etree.ElementTree as _ET
+    pom_content = None
+    selected_munit_version = ''
+    if 'pom_file' in request.files:
+        pom_content = request.files['pom_file'].read().decode('utf-8-sig')
+        selected_munit_version = request.form.get('munit_version', '')
+    elif request.is_json:
+        body = request.get_json() or {}
+        pom_content = body.get('pom_content', '')
+        selected_munit_version = body.get('munit_version', '')
+    if not pom_content:
+        return jsonify({'success': False, 'error': 'No POM content provided'}), 400
+    return jsonify({'success': True, 'pom_analysis': _analyze_pom_content(pom_content, selected_munit_version)})
+
+
+def _analyze_pom_content(pom_content: str, munit_version: str = '') -> dict:
+    import xml.etree.ElementTree as ET, re
+    NS = "http://maven.apache.org/POM/4.0.0"
+    result = {'has_pom': True, 'has_runner': False, 'has_tools': False, 'has_plugin': False,
+              'runner_version': None, 'tools_version': None, 'plugin_version': None,
+              'mule_runtime': None, 'missing': [], 'warnings': [], 'pom_snippet': ''}
+    def _strip(tag): return re.sub(r"\{[^}]+\}", "", tag)
+    def _text(node, local):
+        el = node.find(f"{{{NS}}}{local}") or node.find(local)
+        return (el.text or "").strip() if el is not None else ""
+    try:
+        root = ET.fromstring(pom_content.lstrip("\ufeff"))
+    except ET.ParseError as e:
+        result['parse_error'] = str(e); return result
+    props = root.find(f"{{{NS}}}properties") or root.find("properties")
+    if props is not None:
+        for child in props:
+            if "mule" in _strip(child.tag).lower() and "version" in _strip(child.tag).lower():
+                result['mule_runtime'] = (child.text or "").strip(); break
+    for dep in root.iter():
+        if _strip(dep.tag) != "dependency": continue
+        gid, aid, ver = _text(dep,"groupId"), _text(dep,"artifactId"), _text(dep,"version")
+        if gid == "com.mulesoft.munit":
+            if aid == "munit-runner": result['has_runner'] = True; result['runner_version'] = ver
+            elif aid == "munit-tools": result['has_tools'] = True; result['tools_version'] = ver
+    for plugin in root.iter():
+        if _strip(plugin.tag) != "plugin": continue
+        if _text(plugin,"groupId") == "com.mulesoft.munit.tools" and _text(plugin,"artifactId") == "munit-maven-plugin":
+            result['has_plugin'] = True; result['plugin_version'] = _text(plugin,"version")
+    detected = result['runner_version'] or result['tools_version']
+    if detected and munit_version and detected != munit_version:
+        result['warnings'].append(f"POM has MUnit {detected} but you selected {munit_version}")
+    if not result['has_runner']: result['missing'].append('munit-runner dependency')
+    if not result['has_tools']: result['missing'].append('munit-tools dependency')
+    if not result['has_plugin']: result['missing'].append('munit-maven-plugin')
+    if result['missing']:
+        try:
+            from core.version_config import get_pom_snippet
+            result['pom_snippet'] = get_pom_snippet(munit_version or detected or '2.3.15', result.get('mule_runtime',''))
+        except Exception: pass
+    return result
+
+
+@app.route('/api/job-status/<job_id>', methods=['GET'])
+def get_job_status_endpoint(job_id):
+    if job_id in active_jobs:
+        j = active_jobs[job_id]
+        return jsonify(j)
+    if job_id in job_results:
+        r = job_results[job_id]
+        status = 'complete' if r.get('success') else r.get('status', 'error')
+        return jsonify({'status': status, 'success': r.get('success', False), 'result': r})
+    return jsonify({'status': 'not_found', 'error': f'Job {job_id} not found'}), 404
+
+
+
 if __name__ == '__main__':
-    # Create output directory if it doesn't exist
-    os.makedirs('./output/', exist_ok=True)
-    
     # Run the application
     app.run(debug=True, host='0.0.0.0', port=5000)

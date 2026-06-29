@@ -16,6 +16,26 @@ test_naming_convention: "{flow-name}-{scenario-name}-test"
 # Example: process-order-flow-downstream-failure-test
 
 # ─────────────────────────────────────────
+# FLOW SOURCE ENABLEMENT
+# ─────────────────────────────────────────
+flow_source_enablement:
+  description: "Declare dynamically resolved flow-ref targets at suite level so MUnit can discover them during runtime."
+  applies_when:
+    - "A selected flow or nested child flow calls another flow using a dynamic expression such as #[vars.flowName]."
+    - "Static analysis resolves the dynamic expression to one or more concrete flow names."
+    - "The generated MUnit suite executes the selected flow end-to-end and must allow the dynamically reached flow to be available."
+  suite_level_position: "Immediately after <munit:config> and before <munit:test> elements."
+  xml_template: |
+    <munit:enable-flow-sources>
+        <munit:enable-flow-source value="{resolved-dynamic-flow-name}"/>
+    </munit:enable-flow-sources>
+  rules:
+    - "Include each resolved dynamic flow-ref target once."
+    - "Do not include the selected target flow itself."
+    - "Preserve the flow name exactly as it appears in the Mule application XML."
+    - "Use this list for dynamically called nested flows, including cases where the flow name is assigned in an upstream parent flow variable."
+
+# ─────────────────────────────────────────
 # BEHAVIOR SECTION RULES (setup / mocks)
 # ─────────────────────────────────────────
 behavior_section:
