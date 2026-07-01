@@ -1441,8 +1441,9 @@ class XMLAnalyzer:
                 if child_name not in graph:
                     graph[child_name] = {
                         "name": child_name,
-                        "type": "referenced-flow",
-                        "source_file": "unknown.xml",
+                        "type": "external-dependency-flow",
+                        "source_file": "external dependency (not in uploaded app)",
+                        "external_dependency": True,
                         "children": [],
                         "parents": [],
                         "connectors": [],
@@ -1459,6 +1460,10 @@ class XMLAnalyzer:
                         "inline_dwl": [],
                         "payload_references": [],
                         "mock_plan": [],
+                        "dynamic_flow_refs": [],
+                        "dw_lookup_refs": [],
+                        "unresolved_refs": [],
+                        "var_value_map": {},
                         "xml_snippet": ""
                     }
                 if flow_name not in graph[child_name]["parents"]:
@@ -1880,6 +1885,19 @@ class XMLAnalyzer:
                 expanded_processor_chain,
                 flow_graph,
             )
+            external_flow_refs = self._external_flow_refs_for_traversal(
+                expanded_processor_chain,
+                flow_graph,
+            )
+            external_flow_names = [item["target_flow"] for item in external_flow_refs]
+            external_assisted_flow_names: List[str] = []
+            for execution_flow in execution_flows:
+                execution_node = flow_graph.get(execution_flow, {}) or {}
+                if not execution_node.get("external_dependency"):
+                    continue
+                for linked_flow in [execution_flow] + list(execution_node.get("external_linked_local_flows", []) or []):
+                    if linked_flow and linked_flow not in external_assisted_flow_names:
+                        external_assisted_flow_names.append(linked_flow)
             unresolved_flow_refs = self._find_unresolved_flow_refs(expanded_processor_chain, flow_graph)
             effective_final_processor = self._effective_final_processor_for_target(
                 target,
@@ -1887,6 +1905,7 @@ class XMLAnalyzer:
                 expanded_processor_chain,
             )
             inherited_mock_plan = self._build_mock_plan(expanded_processor_chain)
+            inherited_mock_plan.extend(self._external_flow_ref_mock_plan(external_flow_refs))
             execution_paths = self._build_execution_paths(
                 target,
                 execution_flows,
@@ -1935,7 +1954,12 @@ class XMLAnalyzer:
                 "unresolved_flow_refs": unresolved_flow_refs,
                 "flow_traversal_warnings": traversal_warnings,
                 "dynamic_flow_sources": dynamic_flow_sources,
-                "munit_enable_flow_sources": dynamic_flow_sources,
+                "external_flow_refs": external_flow_refs,
+                "external_flow_names": external_flow_names,
+                "external_assisted_flow_names": external_assisted_flow_names,
+                "munit_enable_flow_sources": list(dict.fromkeys(
+                    dynamic_flow_sources + external_flow_names + external_assisted_flow_names
+                )),
                 "traversal_connectors": traversal_connectors,
                 "connectors": sorted(inherited_connectors),
                 "error_handlers": sorted(inherited_error_handlers),
@@ -1998,6 +2022,57 @@ class XMLAnalyzer:
                 seen.add(candidate)
                 enabled.append(candidate)
         return enabled
+
+    def _external_flow_refs_for_traversal(
+        self,
+        processor_chain: List[Dict],
+        flow_graph: Dict[str, Dict],
+    ) -> List[Dict]:
+        refs: List[Dict] = []
+        seen = set()
+        for processor in processor_chain or []:
+            if processor.get("type") != "flow-ref":
+                continue
+            targets = list(processor.get("dynamic_flow_candidates", []) or [])
+            ref_name = processor.get("name") or processor.get("ref") or processor.get("target") or ""
+            if ref_name and not self._is_dynamic_flow_ref(ref_name) and ref_name not in targets:
+                targets.append(ref_name)
+            for target in targets:
+                node = flow_graph.get(target)
+                if not target or not node or not node.get("external_dependency"):
+                    continue
+                key = (processor.get("flow", ""), processor.get("doc_name", ""), ref_name, target)
+                if key in seen:
+                    continue
+                seen.add(key)
+                refs.append({
+                    "source_flow": processor.get("flow", ""),
+                    "target_flow": target,
+                    "doc_name": processor.get("doc_name", ""),
+                    "expression": ref_name,
+                    "dynamic": bool(processor.get("dynamic")),
+                    "reason": "flow-ref target is not present in uploaded app XML; likely supplied by a parent/dependency Mule app",
+                })
+        return refs
+
+    def _external_flow_ref_mock_plan(self, external_flow_refs: List[Dict]) -> List[Dict]:
+        plan: List[Dict] = []
+        for ref in external_flow_refs or []:
+            doc_name = ref.get("doc_name") or ref.get("target_flow") or "external-flow-ref"
+            plan.append({
+                "processor": "flow-ref",
+                "flow": ref.get("source_flow", ""),
+                "doc_name": doc_name,
+                "match_attribute": "doc:name" if ref.get("doc_name") else "name",
+                "match_value": ref.get("doc_name") or ref.get("target_flow") or "",
+                "action": "mock-when",
+                "media_type": "application/json",
+                "result_shape": "object",
+                "external_dependency": True,
+                "external_flow": ref.get("target_flow", ""),
+                "reason": ref.get("reason", ""),
+            })
+        return plan
 
     def _graph_node_has_source_listener(self, node: Dict) -> bool:
         trigger_type = ((node.get("trigger") or {}).get("type") or "").lower()

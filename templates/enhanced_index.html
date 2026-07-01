@@ -382,14 +382,14 @@
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.75rem">
       <span style="font-size:.8rem;color:var(--pwc-gray)" id="flowCount">0 flows found</span>
       <div style="display:flex;gap:.5rem">
-        <button class="btn-ghost" onclick="selectAllFlows()">Select all</button>
         <button class="btn-ghost" onclick="clearFlowSelection()">Clear</button>
       </div>
     </div>
     <div id="flowList" style="display:flex;flex-direction:column;gap:.375rem;max-height:28rem;overflow-y:auto"></div>
+    <div id="dependencyResolutionPanel" class="hidden" style="margin-top:1rem;border:1px solid var(--pwc-gray-border);padding:1rem;background:var(--pwc-gray-bg)"></div>
     <div style="margin-top:1.25rem;display:flex;justify-content:space-between">
       <button class="btn-secondary" onclick="goToStep(4)">← Back</button>
-      <button class="btn-primary" onclick="goToConnectorSamples()" id="step5Btn" disabled>Next: Provide Mock Data →</button>
+      <button class="btn-primary" onclick="resolveSelectedFlowBeforeMocks()" id="step5Btn" disabled>Next: Trace Flow →</button>
     </div>
   </section>
 
@@ -435,6 +435,7 @@
         Generate MUnit Tests →
       </button>
     </div>
+    <div id="genErrorAlert" class="hidden" role="alert" style="margin:-.5rem 0 1rem;padding:.75rem 1rem;background:#fde8e8;border-left:4px solid var(--pwc-error);color:var(--pwc-error);font-size:.82rem;white-space:pre-wrap;word-break:break-word"></div>
 
     <div class="hidden" id="genProgressWrap" style="margin-bottom:1.5rem">
       <div class="progress-track">
@@ -518,7 +519,11 @@ const state = {
   analysisId: null, flows: [],
   entryPointFlows:  [],
   apiResourceFlows: [],
+  internalFlows: [],
+  externalFlows: [],
   unreachableFlows: [],
+  selectedFlowTrace: null,
+  dependencyArtifactFile: null,
   selectedFlows: new Set(),
   buildValidation: {},
   connectorSamples: {},
@@ -675,11 +680,13 @@ async function analyzeFlows() {
     const sel = data.selection || {};
     state.entryPointFlows  = (sel.entry_point_flows  || sel.parent_flows || []);
     state.apiResourceFlows = (sel.api_resource_flows || []);
+    state.internalFlows    = (sel.internal_flows     || []);
+    state.externalFlows    = (sel.external_flows     || []);
     state.unreachableFlows = (sel.unreachable_flows  || []);
 
-    // Pre-select entry_point and api_resource flows (both need MUnit)
-    state.entryPointFlows.forEach(f  => state.selectedFlows.add(f.name));
-    state.apiResourceFlows.forEach(f => state.selectedFlows.add(f.name));
+    // Selection must be explicit. A flow chosen as an external callback is a
+    // continuation of the selected root, not another MUnit test target.
+    state.selectedFlows.clear();
 
     renderFlows();
     completeStep(2);
@@ -693,15 +700,19 @@ function renderFlows() {
   const list = document.getElementById('flowList');
   const ep   = state.entryPointFlows  || [];
   const ar   = state.apiResourceFlows || [];
+  const inf  = state.internalFlows    || [];
+  const ex   = state.externalFlows    || [];
   const ur   = state.unreachableFlows || [];
-  const total = ep.length + ar.length;
+  const total = ep.length + ar.length + inf.length;
 
   document.getElementById('flowCount').textContent =
     `${ep.length} entry-point flow${ep.length!==1?'s':''}, ` +
     `${ar.length} API resource flow${ar.length!==1?'s':''}`+
+    (inf.length ? `, ${inf.length} internal` : '') +
+    (ex.length ? `, ${ex.length} external dependency` : '') +
     (ur.length ? `, ${ur.length} unreachable` : '');
 
-  if (!total && !ur.length) {
+  if (!total && !ex.length && !ur.length) {
     list.innerHTML='<p style="color:var(--pwc-gray);text-align:center;padding:2rem 0;font-size:.875rem">No flows found in this project.</p>';
     return;
   }
@@ -728,7 +739,27 @@ function renderFlows() {
     html += ar.map(f => _flowCard(f, 'api_resource')).join('');
   }
 
-  // ── Group 3: Unreachable flows ─────────────────────────────────────────────
+  // ── Group 3: Internal flows ────────────────────────────────────────────────
+  if (inf.length) {
+    html += _groupHeader(
+      'Internal Child Flows',
+      'Called by entry points or dependency bridges. Select one only when you want a direct suite for it.',
+      '#7d3c98', inf.length
+    );
+    html += inf.map(f => _flowCard(f, 'internal')).join('');
+  }
+
+  // ── Group 4: External dependency flows ─────────────────────────────────────
+  if (ex.length) {
+    html += _groupHeader(
+      'External Dependency Flows',
+      'Called by this app, but XML is not inside the uploaded ZIP. Mock the flow-ref or link local child flows during generation.',
+      '#b35c00', ex.length
+    );
+    html += ex.map(f => _flowCard(f, 'external')).join('');
+  }
+
+  // ── Group 5: Unreachable flows ─────────────────────────────────────────────
   if (ur.length) {
     html += _groupHeader(
       'Unreachable Flows',
@@ -761,15 +792,17 @@ function _flowCard(f, category) {
   const deps          = (f.referenced_flows||[]).length + (f.dw_lookup_refs||[]).length + (f.child_flows||[]).length;
   const trigger       = f.trigger || f.trigger_type || '';
   const isUnreachable = category === 'unreachable';
-  const borderColor   = category === 'entry_point' ? 'var(--pwc-orange)' : category === 'api_resource' ? '#1a56db' : '#9ca3af';
-  const selClass      = (checked && !isUnreachable) ? 'selected' : '';
-  const borderStyle   = (checked && !isUnreachable) ? borderColor : 'transparent';
-  const opacityStyle  = isUnreachable ? 'opacity:.55' : '';
+  const isExternal    = category === 'external';
+  const disabled      = isUnreachable || isExternal;
+  const borderColor   = category === 'entry_point' ? 'var(--pwc-orange)' : category === 'api_resource' ? '#1a56db' : category === 'internal' ? '#7d3c98' : '#9ca3af';
+  const selClass      = (checked && !disabled) ? 'selected' : '';
+  const borderStyle   = (checked && !disabled) ? borderColor : 'transparent';
+  const opacityStyle  = disabled ? 'opacity:.6' : '';
   const safeName      = esc(f.name);
   const safeFile      = f.source_file ? esc(f.source_file.split('/').pop()) : '';
 
   // Use data-flowname + event delegation — avoids ALL quote-nesting problems
-  const clickable     = isUnreachable ? '' : 'data-flowname="' + safeName + '"';
+  const clickable     = disabled ? '' : 'data-flowname="' + safeName + '"';
 
   let chips = '';
   mocks.forEach(c => { chips += '<span class="pill chip-mock">' + esc(c) + '</span>'; });
@@ -779,17 +812,19 @@ function _flowCard(f, category) {
   return '<div class="flow-card ' + selClass + '" id="fc-' + safeName + '" ' + clickable +
          ' style="' + opacityStyle + ';border-left-color:' + borderStyle + '">' +
     '<div style="display:flex;align-items:flex-start;gap:.75rem">' +
-      '<input type="checkbox" class="flow-chk" style="margin-top:.2rem;accent-color:var(--pwc-orange);width:1rem;height:1rem;flex-shrink:0"' +
-             ' id="chk-' + safeName + '" ' + ((checked&&!isUnreachable)?'checked':'') + ' ' + (isUnreachable?'disabled':'') +
+      '<input type="radio" name="selectedFlow" class="flow-chk" style="margin-top:.2rem;accent-color:var(--pwc-orange);width:1rem;height:1rem;flex-shrink:0"' +
+             ' id="chk-' + safeName + '" ' + ((checked&&!disabled)?'checked':'') + ' ' + (disabled?'disabled':'') +
              ' data-flowname="' + safeName + '">' +
       '<div style="flex:1;min-width:0">' +
         '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin-bottom:.3rem">' +
           '<span style="font-weight:600;font-size:.875rem;color:var(--pwc-black)">' + safeName + '</span>' +
           (trigger ? '<span class="pill pill-blue">' + esc(trigger) + '</span>' : '') +
           (isUnreachable ? '<span class="pill pill-gray">⚠ Unreachable</span>' : '') +
+          (isExternal ? '<span class="pill pill-gray">External</span>' : '') +
           (safeFile ? '<span style="font-size:.7rem;color:var(--pwc-gray)">' + safeFile + '</span>' : '') +
         '</div>' +
         '<div style="display:flex;flex-wrap:wrap;gap:.3rem">' + chips + '</div>' +
+        (isExternal ? '<p style="font-size:.72rem;color:var(--pwc-gray);margin-top:.3rem">Available only through a parent/dependency app. It will be enabled and can be mocked from the calling flow.</p>' : '') +
         (isUnreachable ? '<p style="font-size:.72rem;color:var(--pwc-gray);margin-top:.3rem">Not reachable from any entry point — low test value.</p>' : '') +
       '</div>' +
     '</div>' +
@@ -799,11 +834,11 @@ function _flowCard(f, category) {
 function toggleFlow(name) {
   const chk  = document.getElementById(`chk-${name}`);
   const card = document.getElementById(`fc-${name}`);
-  const all  = [...(state.entryPointFlows||[]), ...(state.apiResourceFlows||[])];
+  const all  = [...(state.entryPointFlows||[]), ...(state.apiResourceFlows||[]), ...(state.internalFlows||[])];
   const f    = all.find(x=>x.name===name);
   if (!f) return;
   const cat = f.flow_category || 'entry_point';
-  const borderColor = cat==='api_resource' ? '#1a56db' : 'var(--pwc-orange)';
+  const borderColor = cat==='api_resource' ? '#1a56db' : cat==='internal' ? '#7d3c98' : 'var(--pwc-orange)';
 
   if (state.selectedFlows.has(name)) {
     state.selectedFlows.delete(name);
@@ -811,6 +846,17 @@ function toggleFlow(name) {
     card.style.borderLeftColor = 'transparent';
     if (chk) chk.checked = false;
   } else {
+    const previous = [...state.selectedFlows];
+    state.selectedFlows.clear();
+    previous.forEach(previousName => {
+      const previousChk = document.getElementById(`chk-${previousName}`);
+      const previousCard = document.getElementById(`fc-${previousName}`);
+      if (previousChk) previousChk.checked = false;
+      if (previousCard) {
+        previousCard.classList.remove('selected');
+        previousCard.style.borderLeftColor = 'transparent';
+      }
+    });
     state.selectedFlows.add(name);
     card.classList.add('selected');
     card.style.borderLeftColor = borderColor;
@@ -819,18 +865,9 @@ function toggleFlow(name) {
   updateStep5Btn();
 }
 
-function selectAllFlows() {
-  [...(state.entryPointFlows||[]), ...(state.apiResourceFlows||[])].forEach(f => {
-    state.selectedFlows.add(f.name);
-    const chk=document.getElementById(`chk-${f.name}`); if(chk) chk.checked=true;
-    const card=document.getElementById(`fc-${f.name}`); if(card) card.classList.add('selected');
-  });
-  updateStep5Btn();
-}
-
 function clearFlowSelection() {
   state.selectedFlows.clear();
-  [...(state.entryPointFlows||[]), ...(state.apiResourceFlows||[]), ...(state.unreachableFlows||[])].forEach(f=>{
+  [...(state.entryPointFlows||[]), ...(state.apiResourceFlows||[]), ...(state.internalFlows||[]), ...(state.externalFlows||[]), ...(state.unreachableFlows||[])].forEach(f=>{
     const chk=document.getElementById(`chk-${f.name}`); if(chk) chk.checked=false;
     const card=document.getElementById(`fc-${f.name}`); if(card) card.classList.remove('selected');
   });
@@ -839,12 +876,172 @@ function clearFlowSelection() {
 
 function updateStep5Btn() { document.getElementById('step5Btn').disabled = state.selectedFlows.size===0; }
 
+async function resolveSelectedFlowBeforeMocks() {
+  if (!state.selectedFlows.size) return;
+  const panel = document.getElementById('dependencyResolutionPanel');
+  const btn = document.getElementById('step5Btn');
+  btn.disabled = true;
+  btn.textContent = 'Tracing…';
+
+  try {
+    const fd = new FormData();
+    fd.append('analysis_id', state.analysisId || '');
+    fd.append('selected_flows', JSON.stringify([...state.selectedFlows]));
+
+    const links = collectManualExternalLinks();
+    if (links.length) {
+      const existing = state.flowTestData || {};
+      state.flowTestData = {...existing, externalFlowLinks: links};
+      fd.append('flow_test_data', JSON.stringify(state.flowTestData));
+    }
+    if (state.dependencyArtifactFile) {
+      fd.append('dependency_artifact', state.dependencyArtifactFile);
+    }
+
+    const res = await fetch('/api/enhanced/resolve-selected-flow', { method:'POST', body:fd });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || 'Flow trace failed');
+
+    applySelectionPayload(data.selection || {});
+    state.selectedFlowTrace = data.selected_flow_trace || {};
+    const stops = (state.selectedFlowTrace.external_stops || []);
+
+    if (stops.length && !links.length) {
+      renderDependencyResolutionPanel(state.selectedFlowTrace);
+      panel.classList.remove('hidden');
+      btn.textContent = 'Apply Choice & Continue →';
+      return;
+    }
+
+    panel.classList.add('hidden');
+    goToConnectorSamples();
+  } catch(e) {
+    showToast(`Trace failed: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = state.selectedFlows.size === 0;
+    if (btn.textContent === 'Tracing…') btn.textContent = 'Next: Trace Flow →';
+  }
+}
+
+function applySelectionPayload(sel) {
+  state.entryPointFlows  = (sel.entry_point_flows  || sel.parent_flows || state.entryPointFlows || []);
+  state.apiResourceFlows = (sel.api_resource_flows || state.apiResourceFlows || []);
+  state.internalFlows    = (sel.internal_flows     || state.internalFlows || []);
+  state.externalFlows    = (sel.external_flows     || state.externalFlows || []);
+  state.unreachableFlows = (sel.unreachable_flows  || state.unreachableFlows || []);
+}
+
+function renderDependencyResolutionPanel(trace) {
+  const stops = trace.external_stops || [];
+  const local = trace.local_flow_candidates || [];
+  const traces = trace.traces || [];
+  const firstHint = (stops[0]?.dependency_hint || trace.dependency_hints?.[0] || {});
+  const localPath = firstHint.local_maven_path || '~/.m2/repository/<group>/<artifact>/<version>/<artifact>-<version>.jar';
+  const alreadyTraced = new Set(traces.flatMap(t => t.execution_flows || []));
+
+  const traceHtml = traces.map(t => {
+    const chain = (t.nodes || []).map(n => {
+      const label = n.external ? `${esc(n.name)} <span class="pill pill-gray">STOP</span>` : esc(n.name);
+      return `<span style="font-weight:600">${label}</span>`;
+    }).join(' <span style="color:var(--pwc-gray)">→</span> ');
+    return `<div style="padding:.65rem .75rem;background:white;border-left:3px solid var(--pwc-orange);margin:.45rem 0">
+      <div style="font-size:.7rem;font-weight:700;color:var(--pwc-gray);text-transform:uppercase;margin-bottom:.3rem">Selected root: ${esc(t.flow)}</div>
+      <div style="font-size:.82rem;color:var(--pwc-black)">${chain}</div>
+    </div>`;
+  }).join('');
+
+  const stopHtml = stops.map(stop => `
+    <div style="padding:.75rem;background:white;border-left:3px solid #b35c00;margin:.6rem 0">
+      <div style="font-weight:700;font-size:.85rem;color:var(--pwc-black)">Flow ${esc(stop.flow)} is from a runtime dependency</div>
+      <p style="font-size:.76rem;color:var(--pwc-gray);margin-top:.25rem">${esc(stop.message || '')}</p>
+    </div>
+  `).join('');
+
+  const checklist = stops.map(stop => `
+    <div style="margin-top:.75rem">
+      <div style="font-size:.78rem;font-weight:700;color:var(--pwc-black);margin-bottom:.35rem">Which current-app flows can ${esc(stop.flow)} call back into?</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.35rem">
+        ${local.filter(name => name !== stop.flow && !alreadyTraced.has(name)).map(name => {
+          const id = depId(stop.flow, name);
+          return `<label style="display:flex;align-items:center;gap:.4rem;font-size:.78rem;background:white;padding:.4rem;border:1px solid var(--pwc-gray-border)">
+            <input type="checkbox" data-external-flow="${esc(stop.flow)}" data-local-flow="${esc(name)}" id="${id}" style="accent-color:var(--pwc-orange)">
+            <span>${esc(name)}</span>
+          </label>`;
+        }).join('')}
+      </div>
+      <textarea class="sample-input" rows="2" data-external-condition="${esc(stop.flow)}" style="margin-top:.5rem" placeholder="What triggers each path? Example: D when vars.type == 'D'; E otherwise"></textarea>
+    </div>
+  `).join('');
+
+  document.getElementById('dependencyResolutionPanel').innerHTML = `
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem">
+      <div>
+        <div style="font-weight:800;color:var(--pwc-black);font-size:.92rem">Selected Flow Trace</div>
+        ${traceHtml}
+      </div>
+      <button class="btn-ghost" onclick="clearDependencyResolution()">Clear choices</button>
+    </div>
+    ${stopHtml}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:1rem">
+      <div style="background:white;padding:.875rem;border:1px solid var(--pwc-gray-border)">
+        <div style="font-weight:700;font-size:.82rem;color:var(--pwc-black)">Choice 1 — Upload JAR/XML</div>
+        <p style="font-size:.74rem;color:var(--pwc-gray);margin:.35rem 0">Find this file on your machine if it exists:</p>
+        <code style="display:block;white-space:pre-wrap;word-break:break-all;background:var(--pwc-gray-bg);padding:.5rem;font-size:.72rem">${esc(localPath)}</code>
+        <input type="file" id="dependencyArtifactInput" accept=".jar,.zip,.xml,.mule" style="margin-top:.75rem;font-size:.75rem" onchange="onDependencyArtifactSelect(event)">
+        <div id="dependencyArtifactLabel" style="font-size:.72rem;color:var(--pwc-orange);margin-top:.35rem">${state.dependencyArtifactFile ? esc(state.dependencyArtifactFile.name) : 'No dependency artifact selected'}</div>
+      </div>
+      <div style="background:white;padding:.875rem;border:1px solid var(--pwc-gray-border)">
+        <div style="font-weight:700;font-size:.82rem;color:var(--pwc-black)">Choice 2 — Declare manually</div>
+        ${checklist || '<p style="font-size:.75rem;color:var(--pwc-gray)">No local flows available to link.</p>'}
+      </div>
+    </div>`;
+}
+
+function depId(externalFlow, localFlow) {
+  return 'dep_' + String(externalFlow + '_' + localFlow).replace(/[^a-z0-9_]/gi, '_');
+}
+
+function onDependencyArtifactSelect(e) {
+  state.dependencyArtifactFile = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+  const label = document.getElementById('dependencyArtifactLabel');
+  if (label) label.textContent = state.dependencyArtifactFile ? `${state.dependencyArtifactFile.name} (${fmtBytes(state.dependencyArtifactFile.size)})` : 'No dependency artifact selected';
+}
+
+function collectManualExternalLinks() {
+  const panel = document.getElementById('dependencyResolutionPanel');
+  if (!panel || panel.classList.contains('hidden')) return [];
+  const byExternal = {};
+  panel.querySelectorAll('input[data-external-flow]:checked').forEach(chk => {
+    const externalFlow = chk.getAttribute('data-external-flow');
+    const localFlow = chk.getAttribute('data-local-flow');
+    if (!byExternal[externalFlow]) byExternal[externalFlow] = [];
+    byExternal[externalFlow].push(localFlow);
+  });
+  return Object.entries(byExternal).map(([externalFlow, linkedLocalFlows]) => {
+    const condition = [...panel.querySelectorAll('[data-external-condition]')]
+      .find(item => item.getAttribute('data-external-condition') === externalFlow)?.value || '';
+    return { externalFlow, linkedLocalFlows, condition };
+  });
+}
+
+function clearDependencyResolution() {
+  state.dependencyArtifactFile = null;
+  const panel = document.getElementById('dependencyResolutionPanel');
+  panel?.querySelectorAll('input[type="checkbox"]').forEach(chk => chk.checked = false);
+  panel?.querySelectorAll('textarea').forEach(ta => ta.value = '');
+  const file = document.getElementById('dependencyArtifactInput');
+  if (file) file.value = '';
+  const label = document.getElementById('dependencyArtifactLabel');
+  if (label) label.textContent = 'No dependency artifact selected';
+}
+
 // ─── Connector samples ────────────────────────────────────────────────────────
 function goToConnectorSamples() {
   const connectors = [];
   const seen = new Set();
   const selected = [...(state.entryPointFlows||[]),
-                    ...(state.apiResourceFlows||[])]
+                    ...(state.apiResourceFlows||[]),
+                    ...(state.internalFlows||[])]
                    .filter(f => state.selectedFlows.has(f.name));
 
   selected.forEach(flow => {
@@ -914,12 +1111,18 @@ function renderConnectorSamples(connectors) {
     byFlow[fk].push({...c, _idx: i});
   });
 
-  const flowKeys = Object.keys(byFlow);
+  const tracedFlows = ((state.selectedFlowTrace?.traces || [])[0]?.execution_flows || []);
+  const connectorFlowKeys = Object.keys(byFlow);
+  const flowKeys = [
+    ...tracedFlows.filter(flowName => Object.prototype.hasOwnProperty.call(byFlow, flowName)),
+    ...connectorFlowKeys.filter(flowName => !tracedFlows.includes(flowName)),
+  ];
+  const callChainFlows = tracedFlows.length ? tracedFlows : flowKeys;
   let html = '';
 
-  if (flowKeys.length > 1) {
+  if (callChainFlows.length > 1) {
     html += '<div style="padding:.6rem .875rem;background:var(--pwc-gray-bg);border-left:3px solid var(--pwc-orange);margin-bottom:.75rem;font-size:.78rem;color:var(--pwc-gray-dark)"><strong>Call chain traced:</strong> '
-          + flowKeys.map(f => '<code>' + esc(f) + '</code>').join(' → ') + '</div>';
+          + callChainFlows.map(f => '<code>' + esc(f) + '</code>').join(' → ') + '</div>';
   }
 
   flowKeys.forEach(flowName => {
@@ -933,6 +1136,7 @@ function renderConnectorSamples(connectors) {
     byFlow[flowName].forEach(c => {
       const key    = ('cs_' + (c.id || c.processor + '_' + c._idx)).replace(/[^a-z0-9_]/gi,'_');
       const isMock = c.action === 'mock-when' || c.decision === 'mock';
+      const isExternalFlowRef = isMock && (c.processor === 'flow-ref' || c.external_dependency);
       const accent = isMock ? 'var(--pwc-orange)' : 'var(--pwc-warn)';
       const label  = isMock ? 'MOCK' : 'SPY';
       const opLine = esc(c.display_name || c.doc_name || c.processor || c.type || '');
@@ -955,12 +1159,31 @@ function renderConnectorSamples(connectors) {
               +   '</div>'
               +   '<div>'
               +     '<label style="display:block;font-size:.72rem;font-weight:700;color:var(--pwc-gray-dark);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.35rem">'
-              +       '&#x1F4E4; Output Sample <span style="font-weight:400;text-transform:none;color:var(--pwc-gray)">&#8212; mock return value</span>'
+              +       '&#x1F4E4; ' + (isExternalFlowRef ? 'Returned Payload' : 'Output Sample') + ' <span style="font-weight:400;text-transform:none;color:var(--pwc-gray)">&#8212; mock return value</span>'
               +     '</label>'
               +     '<textarea id="out_' + key + '" class="sample-input" rows="5" placeholder="[{&quot;id&quot;:1,&quot;name&quot;:&quot;Widget&quot;}]" data-cskey="' + key + '" data-csfield="output"></textarea>'
               +   '</div>'
               + '</div>'
-              + '<p style="font-size:.72rem;color:var(--pwc-gray);margin-top:.5rem">Populates <code>munit-tools:mock-when &#x2192; then-return &#x2192; payload</code>.</p>';
+              + (isExternalFlowRef
+                ? '<div style="margin-top:.75rem;padding:.75rem;background:var(--pwc-gray-bg);border-left:3px solid var(--pwc-orange)">'
+                  + '<div style="font-size:.75rem;font-weight:700;color:var(--pwc-black);margin-bottom:.45rem">What does this external flow return?</div>'
+                  + '<div style="display:flex;gap:.75rem;flex-wrap:wrap;font-size:.76rem">'
+                  +   '<label><input type="checkbox" checked data-cskey="' + key + '" data-return-kind="payload" style="accent-color:var(--pwc-orange)"> Payload</label>'
+                  +   '<label><input type="checkbox" data-cskey="' + key + '" data-return-kind="variables" style="accent-color:var(--pwc-orange)"> Variables</label>'
+                  +   '<label><input type="checkbox" data-cskey="' + key + '" data-return-kind="attributes" style="accent-color:var(--pwc-orange)"> Attributes</label>'
+                  +   '<label><input type="checkbox" data-cskey="' + key + '" data-return-kind="error" style="accent-color:var(--pwc-orange)"> Error</label>'
+                  +   '<label><input type="checkbox" data-cskey="' + key + '" data-return-kind="nothing" style="accent-color:var(--pwc-orange)"> Nothing</label>'
+                  + '</div>'
+                  + '<div class="grid grid-cols-2 gap-4" style="margin-top:.65rem">'
+                  +   '<div><label style="display:block;font-size:.7rem;font-weight:700;color:var(--pwc-gray-dark);margin-bottom:.3rem">RETURNED VARIABLES (JSON)</label>'
+                  +     '<textarea class="sample-input" rows="3" placeholder="{&quot;clientId&quot;:&quot;CLIENT-001&quot;,&quot;validated&quot;:true}" data-cskey="' + key + '" data-csfield="variables"></textarea></div>'
+                  +   '<div><label style="display:block;font-size:.7rem;font-weight:700;color:var(--pwc-gray-dark);margin-bottom:.3rem">RETURNED ATTRIBUTES (JSON)</label>'
+                  +     '<textarea class="sample-input" rows="3" placeholder="{&quot;statusCode&quot;:200}" data-cskey="' + key + '" data-csfield="returnAttributes"></textarea></div>'
+                  + '</div>'
+                  + '<div style="margin-top:.65rem"><label style="display:block;font-size:.7rem;font-weight:700;color:var(--pwc-gray-dark);margin-bottom:.3rem">ERROR TYPE</label>'
+                  +   '<input type="text" class="sample-input" placeholder="APP:VALIDATION" data-cskey="' + key + '" data-csfield="errorType"></div>'
+                  + '</div>'
+                : '<p style="font-size:.72rem;color:var(--pwc-gray);margin-top:.5rem">Populates <code>munit-tools:mock-when &#x2192; then-return &#x2192; payload</code>.</p>');
       } else {
         html += '<div>'
               +   '<label style="display:block;font-size:.72rem;font-weight:700;color:var(--pwc-gray-dark);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.35rem">'
@@ -982,24 +1205,75 @@ function renderConnectorSamples(connectors) {
     hdr.addEventListener('click', () => toggleCC(hdr.getAttribute('data-toggle')));
   });
 
-  // Wire up textarea input via event delegation
-  list.querySelectorAll('textarea[data-cskey]').forEach(ta => {
-    ta.addEventListener('input', () => {
-      const k = ta.getAttribute('data-cskey');
-      const f = ta.getAttribute('data-csfield');
-      const connector = connectors.find(item => ('cs_' + (item.id || item.processor + '_' + item._idx)).replace(/[^a-z0-9_]/gi,'_') === k) || {};
-      if (!state.connectorSamples[k]) {
-        state.connectorSamples[k] = {
-          id: connector.id || k,
-          flow: connector.flowName || connector.flow || '',
-          source_flow: connector.source_flow || connector.flow || '',
-          processor: connector.processor || connector.type || '',
-          doc_name: connector.doc_name || connector.display_name || '',
-          input:'',
-          output:''
-        };
+  function ensureConnectorSample(k) {
+    const connector = connectors.find(item => ('cs_' + (item.id || item.processor + '_' + item._idx)).replace(/[^a-z0-9_]/gi,'_') === k) || {};
+    if (!state.connectorSamples[k]) {
+      state.connectorSamples[k] = {
+        id: connector.id || k,
+        flow: connector.flowName || connector.flow || '',
+        source_flow: connector.source_flow || connector.flow || '',
+        processor: connector.processor || connector.type || '',
+        doc_name: connector.doc_name || connector.display_name || '',
+        external_dependency: !!connector.external_dependency,
+        external_flow: connector.external_flow || '',
+        input:'',
+        output:'',
+        returnTypes: connector.processor === 'flow-ref' || connector.external_dependency ? ['payload'] : []
+      };
+    }
+    return state.connectorSamples[k];
+  }
+
+  function setReturnKind(k, kind) {
+    const group = [...list.querySelectorAll(`input[data-cskey="${k}"][data-return-kind]`)];
+    const selected = group.find(item => item.getAttribute('data-return-kind') === kind);
+    if (selected) selected.checked = true;
+    if (kind === 'error' || kind === 'nothing') {
+      group.forEach(item => {
+        if (item.getAttribute('data-return-kind') !== kind) item.checked = false;
+      });
+    } else {
+      group.forEach(item => {
+        const itemKind = item.getAttribute('data-return-kind');
+        if (itemKind === 'error' || itemKind === 'nothing') item.checked = false;
+      });
+    }
+    const sample = ensureConnectorSample(k);
+    sample.returnTypes = group.filter(item => item.checked).map(item => item.getAttribute('data-return-kind'));
+  }
+
+  list.querySelectorAll('textarea[data-cskey], input[data-cskey][data-csfield]').forEach(field => {
+    field.addEventListener('input', () => {
+      const k = field.getAttribute('data-cskey');
+      const fieldName = field.getAttribute('data-csfield');
+      const sample = ensureConnectorSample(k);
+      sample[fieldName] = field.value;
+      const returnKindByField = {
+        output: 'payload',
+        variables: 'variables',
+        returnAttributes: 'attributes',
+        errorType: 'error',
+      };
+      if (field.value.trim() && returnKindByField[fieldName]) {
+        setReturnKind(k, returnKindByField[fieldName]);
       }
-      state.connectorSamples[k][f] = ta.value;
+    });
+  });
+
+  list.querySelectorAll('input[data-cskey][data-return-kind]').forEach(chk => {
+    chk.addEventListener('change', () => {
+      const k = chk.getAttribute('data-cskey');
+      const kind = chk.getAttribute('data-return-kind');
+      const group = [...list.querySelectorAll(`input[data-cskey="${k}"][data-return-kind]`)];
+      if (chk.checked && (kind === 'error' || kind === 'nothing')) {
+        group.forEach(item => { if (item !== chk) item.checked = false; });
+      } else if (chk.checked) {
+        group.forEach(item => {
+          if (item.getAttribute('data-return-kind') === 'error' || item.getAttribute('data-return-kind') === 'nothing') item.checked = false;
+        });
+      }
+      const sample = ensureConnectorSample(k);
+      sample.returnTypes = group.filter(item => item.checked).map(item => item.getAttribute('data-return-kind'));
     });
   });
 }
@@ -1067,6 +1341,11 @@ function renderGenSummary() {
 async function generateMUnit() {
   const btn = document.getElementById('genBtn');
   btn.disabled=true; btn.textContent='Generating…';
+  const errorAlert = document.getElementById('genErrorAlert');
+  if (errorAlert) {
+    errorAlert.classList.add('hidden');
+    errorAlert.textContent = '';
+  }
   document.getElementById('genProgressWrap').classList.remove('hidden');
   document.getElementById('genResults').classList.add('hidden');
   setProgress(5,'Preparing request…');
@@ -1079,6 +1358,7 @@ async function generateMUnit() {
   fd.append('target_munit_version',state.munitVersion);
   fd.append('target_mule_runtime',state.runtimeVersion);
   fd.append('analysis_id',state.analysisId||'');
+  fd.append('use_cached_analysis','true');
   fd.append('connector_samples',JSON.stringify(state.connectorSamples));
   if (Object.keys(state.flowTestData).length) fd.append('flow_test_data',JSON.stringify(state.flowTestData));
 
@@ -1105,8 +1385,17 @@ async function generateMUnit() {
     else { setProgress(100,'Done!'); renderResults(data); }
   } catch(e) {
     document.getElementById('genProgressWrap').classList.add('hidden');
+    showGenerationError(e.message || String(e));
     showToast(`Generation failed: ${e.message}`,'error');
   } finally { btn.disabled=false; btn.textContent='Generate MUnit Tests →'; }
+}
+
+function showGenerationError(message) {
+  const alert = document.getElementById('genErrorAlert');
+  if (!alert) return;
+  alert.textContent = `Generation failed: ${message}`;
+  alert.classList.remove('hidden');
+  alert.scrollIntoView({behavior:'smooth', block:'center'});
 }
 
 async function pollJob(jobId, fd) {
@@ -1167,6 +1456,7 @@ function askForFlowData(flowName, requests=[]) {
 
 function submitFlowData() {
   const data = {
+    ...(state.flowTestData || {}),
     payload:          document.getElementById('flowPayload')?.value||'',
     expectedResponse: document.getElementById('flowExpectedResponse')?.value||'',
     statusCode:       document.getElementById('flowStatusCode')?.value||'200',

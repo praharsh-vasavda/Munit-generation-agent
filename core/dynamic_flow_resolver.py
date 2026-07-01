@@ -86,6 +86,12 @@ _OBJECT_FIELD_RE = re.compile(
     r"""['"]?([A-Za-z_][A-Za-z0-9_\-]*)['"]?\s*:\s*['"]([^'"]{1,200})['"]"""
 )
 
+# DataWeave local assignment: var flowName = "FlowA" or flowName = "FlowA".
+# Excludes comparison operators such as ==, !=, <= and >=.
+_ASSIGNMENT_LITERAL_RE = re.compile(
+    r"""\b(?:var\s+)?([A-Za-z_][A-Za-z0-9_\-]*)\s*(?<![!<>=])=(?!=)\s*['"]([^'"]{1,200})['"]"""
+)
+
 # DataWeave lookup() call  — captures the first argument expression
 _DW_LOOKUP_RE = re.compile(
     r"""lookup\s*\(\s*(['"][^'"]+['"]|[^\s,)]{1,200})\s*,""",
@@ -435,6 +441,8 @@ class DynamicFlowResolver:
         """Return object field string values from DW/JSON-like object literals."""
         fields: Dict[str, str] = {}
         for m in _OBJECT_FIELD_RE.finditer(text or ""):
+            fields[m.group(1)] = m.group(2)
+        for m in _ASSIGNMENT_LITERAL_RE.finditer(text or ""):
             fields[m.group(1)] = m.group(2)
         return fields
 

@@ -13,7 +13,10 @@ Covers all 9 dynamic flow-ref patterns:
   9. DW lookup() with concat    lookup("process-" ++ vars.type ++ "-flow", payload)
 """
 
+import json
+import re
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -301,6 +304,12 @@ output application/java
     assert '<munit:enable-flow-sources>' in suite_xml
     assert '<munit:enable-flow-source value="weather-process-flow"/>' in suite_xml
     assert '<munit:enable-flow-source value="openmeteo-system-flow"/>' in suite_xml
+    test_start = suite_xml.index("<munit:test ")
+    enable_start = suite_xml.index("<munit:enable-flow-sources>")
+    execution_start = suite_xml.index("<munit:execution>")
+    test_end = suite_xml.index("</munit:test>")
+    assert test_start < enable_start < execution_start < test_end
+    assert "<munit:enable-flow-sources>" not in suite_xml[:test_start]
     assert metadata["enabled_flow_sources"] == [
         "weather-process-flow",
         "openmeteo-system-flow",
@@ -371,6 +380,73 @@ output application/java
     assert "flowA" in graph["main-flow"]["children"]
     assert "flowA" in context["execution_flows"]
     assert context["munit_enable_flow_sources"] == ["flowA"]
+
+
+def test_dynamic_flow_ref_from_dataweave_equals_assignment():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <mule xmlns="http://www.mulesoft.org/schema/mule/core"
+          xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core">
+      <flow name="main-flow">
+        <ee:transform>
+          <ee:variables>
+            <ee:set-variable variableName="flowName"><![CDATA[%dw 2.0
+output application/java
+var flowName = "flowA"
+---
+flowName
+]]></ee:set-variable>
+          </ee:variables>
+        </ee:transform>
+        <flow-ref doc:name="Call assigned route" name="#[vars.flowName]"/>
+      </flow>
+      <flow name="flowA">
+        <logger message="flow A"/>
+      </flow>
+    </mule>"""
+
+    result = XMLAnalyzer().analyze_mule_project(xml)
+    context = result["flow_contexts"]["main-flow"]
+    suite_xml, metadata = DeterministicMUnitBuilder().build_suite(
+        context,
+        generation_mode="recorder",
+    )
+
+    assert "flowA" in result["flow_graph"]["main-flow"]["children"]
+    assert context["execution_flows"] == ["main-flow", "flowA"]
+    assert context["munit_enable_flow_sources"] == ["flowA"]
+    assert metadata["enabled_flow_sources"] == ["flowA"]
+    assert '<munit:enable-flow-source value="flowA"/>' in suite_xml
+
+
+def test_dynamic_flow_ref_from_cdata_literal_set_variable():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <mule xmlns="http://www.mulesoft.org/schema/mule/core"
+          xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core">
+      <flow name="main-flow">
+        <ee:transform>
+          <ee:variables>
+            <ee:set-variable variableName="flowName"><![CDATA['flowA']]></ee:set-variable>
+          </ee:variables>
+        </ee:transform>
+        <flow-ref doc:name="Call literal route" name="#[vars.flowName]"/>
+      </flow>
+      <flow name="flowA">
+        <logger message="flow A"/>
+      </flow>
+    </mule>"""
+
+    result = XMLAnalyzer().analyze_mule_project(xml)
+    context = result["flow_contexts"]["main-flow"]
+    suite_xml, metadata = DeterministicMUnitBuilder().build_suite(
+        context,
+        generation_mode="recorder",
+    )
+
+    assert result["flow_graph"]["main-flow"]["children"] == ["flowA"]
+    assert context["execution_flows"] == ["main-flow", "flowA"]
+    assert context["munit_enable_flow_sources"] == ["flowA"]
+    assert metadata["enabled_flow_sources"] == ["flowA"]
+    assert '<munit:enable-flow-source value="flowA"/>' in suite_xml
 
 
 def test_dynamic_flow_ref_from_nested_variable_object_arbitrary_field():
@@ -480,6 +556,257 @@ def test_runtime_input_dynamic_flow_ref_asks_then_accepts_user_target():
     assert updated_context["unresolved_flow_refs"] == []
     assert metadata["enabled_flow_sources"] == ["flowA"]
     assert '<munit:enable-flow-source value="flowA"/>' in suite_xml
+
+
+def test_missing_dependency_flow_can_be_mocked_and_linked_to_local_child():
+    from app import WebMUnitGenerator
+
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <mule xmlns="http://www.mulesoft.org/schema/mule/core">
+      <flow name="flowA">
+        <set-variable variableName="flowName" value="flowC"/>
+        <flow-ref doc:name="Call dependency flow" name="flowB"/>
+      </flow>
+      <flow name="flowC">
+        <logger message="local child"/>
+      </flow>
+    </mule>"""
+
+    generator = WebMUnitGenerator()
+    summary = generator.xml_analyzer.analyze_mule_project(xml)
+    summary = generator.apply_selected_flows(summary, ["flowA"])
+    context = summary["flow_contexts"]["flowA"]
+
+    assert summary["flow_graph"]["flowB"]["external_dependency"] is True
+    assert "flowB" in context["execution_flows"]
+    assert "flowB" in context["external_flow_names"]
+    assert "flowB" in context["munit_enable_flow_sources"]
+    assert any(
+        item.get("processor") == "flow-ref" and item.get("external_flow") == "flowB"
+        for item in context["mock_plan"]
+    )
+
+    linked = generator._apply_external_flow_links(
+        summary,
+        {
+            "flow_test_data": json.dumps({
+                "externalFlowLinks": [
+                    {"externalFlow": "flowB", "linkedLocalFlows": ["flowC"]}
+                ]
+            })
+        },
+    )
+    linked_context = linked["flow_contexts"]["flowA"]
+    suite_xml, metadata = DeterministicMUnitBuilder().build_suite(
+        linked_context,
+        generation_mode="recorder",
+    )
+
+    assert "flowC" in linked["flow_graph"]["flowB"]["children"]
+    assert "flowB" in linked["flow_graph"]["flowC"]["parents"]
+    assert "flowC" in linked_context["execution_flows"]
+    assert metadata["enabled_flow_sources"] == ["flowB", "flowC"]
+    assert '<munit:enable-flow-source value="flowB"/>' in suite_xml
+    assert '<munit:enable-flow-source value="flowC"/>' in suite_xml
+
+
+def test_manual_external_callback_is_appended_after_external_stop():
+    from app import WebMUnitGenerator
+
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <mule xmlns="http://www.mulesoft.org/schema/mule/core">
+      <flow name="flowA">
+        <flow-ref name="flowB"/>
+      </flow>
+      <sub-flow name="flowB">
+        <flow-ref name="flowC"/>
+      </sub-flow>
+      <sub-flow name="flowD">
+        <logger message="local callback"/>
+      </sub-flow>
+    </mule>"""
+
+    generator = WebMUnitGenerator()
+    summary = generator.xml_analyzer.analyze_mule_project(xml)
+    summary = generator.apply_selected_flows(summary, ["flowA"])
+    linked = generator._apply_external_flow_links(
+        summary,
+        {
+            "flow_test_data": json.dumps({
+                "externalFlowLinks": [{
+                    "externalFlow": "flowC",
+                    "linkedLocalFlows": ["flowD"],
+                    "condition": "flowD when vars.route == 'D'",
+                }]
+            })
+        },
+    )
+    trace = generator.build_selected_flow_trace_payload(linked, ["flowA"])
+
+    assert linked["flow_contexts"]["flowA"]["execution_flows"] == [
+        "flowA",
+        "flowB",
+        "flowC",
+        "flowD",
+    ]
+    assert trace["traces"][0]["flow"] == "flowA"
+    assert trace["traces"][0]["execution_flows"] == [
+        "flowA",
+        "flowB",
+        "flowC",
+        "flowD",
+    ]
+
+
+def test_flow_selection_keeps_only_one_generation_target():
+    from app import WebMUnitGenerator
+
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <mule xmlns="http://www.mulesoft.org/schema/mule/core">
+      <flow name="flowA"><logger message="a"/></flow>
+      <flow name="flowB"><logger message="b"/></flow>
+    </mule>"""
+
+    generator = WebMUnitGenerator()
+    summary = generator.xml_analyzer.analyze_mule_project(xml)
+    selected = generator.apply_selected_flows(summary, ["flowA", "flowB"])
+    trace = generator.build_selected_flow_trace_payload(selected, ["flowA", "flowB"])
+
+    assert selected["selected_flows"] == ["flowA"]
+    assert selected["test_targets"] == ["flowA"]
+    assert [item["flow"] for item in trace["traces"]] == ["flowA"]
+
+
+def test_duplicate_external_flow_ref_mock_is_rendered_once():
+    flow_context = {
+        "target_flow": "flowA",
+        "target_type": "flow",
+        "mock_plan": [
+            {
+                "action": "mock-when",
+                "processor": "flow-ref",
+                "doc_name": "Call external flow",
+                "match_attribute": "doc:name",
+                "match_value": "Call external flow",
+                "external_dependency": True,
+                "external_flow": "flowB",
+                "media_type": "application/json",
+                "result_shape": "object",
+            },
+            {
+                "action": "mock-when",
+                "processor": "flow-ref",
+                "doc_name": "Call external flow",
+                "match_attribute": "doc:name",
+                "match_value": "Call external flow",
+                "external_dependency": True,
+                "external_flow": "flowB",
+                "media_type": "application/json",
+                "result_shape": "object",
+            },
+        ],
+        "set_event_plan": {},
+        "required_inputs": {},
+        "unresolved_flow_refs": [],
+    }
+
+    suite_xml, metadata = DeterministicMUnitBuilder().build_suite(
+        flow_context,
+        generation_mode="recorder",
+        sample_payload='{"statusCode": 200}',
+    )
+
+    test_blocks = re.findall(r"<munit:test\b.*?</munit:test>", suite_xml, flags=re.DOTALL)
+    assert test_blocks
+    assert all(block.count('processor="flow-ref"') == 1 for block in test_blocks)
+    assert all(block.count('whereValue="Call external flow"') == 1 for block in test_blocks)
+    assert not any(
+        re.search(r"mock_call-external-flow_.+_2(?:_attributes)?\.dwl$", name)
+        for name in metadata["resource_files"]
+    )
+
+
+def test_external_flow_ref_mock_can_return_payload_variables_and_attributes():
+    from app import WebMUnitGenerator
+
+    flow_context = {
+        "target_flow": "flowA",
+        "target_type": "flow",
+        "mock_plan": [{
+            "action": "mock-when",
+            "processor": "flow-ref",
+            "doc_name": "Request to Flow D",
+            "match_attribute": "doc:name",
+            "match_value": "Request to Flow D",
+            "external_dependency": True,
+            "external_flow": "Flow C",
+            "media_type": "application/json",
+            "result_shape": "object",
+        }],
+        "set_event_plan": {},
+        "required_inputs": {},
+        "unresolved_flow_refs": [],
+    }
+    builder = DeterministicMUnitBuilder(
+        output_dir=tempfile.mkdtemp(prefix="external-flow-return-test-")
+    )
+    sample_key = builder._connector_sample_key("flowA", flow_context["mock_plan"][0])
+    posted_samples = {
+        "sample_card": {
+            "id": sample_key,
+            "flow": "flowA",
+            "processor": "flow-ref",
+            "external_dependency": True,
+            "external_flow": "Flow C",
+            "output": '{"status":"success"}',
+            "returnTypes": ["payload"],
+            "variables": '{"clientId":"CLIENT-001","validated":true}',
+            "returnAttributes": '{"statusCode":202}',
+        }
+    }
+    parsed_samples = WebMUnitGenerator()._build_connector_samples_dict({
+        "connector_samples": json.dumps(posted_samples)
+    })
+
+    suite_xml, metadata = builder.build_suite(
+        flow_context,
+        generation_mode="recorder",
+        sample_payload='{"statusCode": 200}',
+        connector_samples=parsed_samples["flowA"],
+    )
+    written_paths = builder.write_maven_layout(suite_xml, metadata)
+
+    ET.fromstring(suite_xml)
+    first_test = re.findall(r"<munit:test\b.*?</munit:test>", suite_xml, flags=re.DOTALL)[0]
+    assert "<munit-tools:payload " in first_test
+    assert "<munit-tools:variables>" in first_test
+    assert 'munit-tools:variable key="clientId"' in first_test
+    assert 'munit-tools:variable key="validated"' in first_test
+    assert "<munit-tools:attributes " in first_test
+    variable_resource_names = [
+        name for name in metadata["resource_files"]
+        if name.endswith("_variables.dwl")
+    ]
+    assert variable_resource_names == ["mock_flow-c_variables.dwl"]
+    assert any(name.endswith("_attributes.dwl") for name in metadata["resource_files"])
+    variable_paths = [
+        Path(path)
+        for key, path in written_paths.items()
+        if key.endswith("_variables.dwl")
+    ]
+    assert variable_paths
+    assert all(path.is_file() for path in variable_paths)
+    variable_references = re.findall(
+        r"getResourceAsString\('([^']+_variables\.dwl)'\)",
+        suite_xml,
+    )
+    assert variable_references
+    assert len(set(variable_references)) == 1
+    assert variable_references[0].endswith("/mock_flow-c_variables.dwl")
+    for reference in variable_references:
+        assert (
+            builder.output_dir / "src" / "test" / "resources" / reference
+        ).is_file()
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────

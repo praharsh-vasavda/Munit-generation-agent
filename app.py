@@ -187,6 +187,7 @@ class WebMUnitGenerator:
                     selected_flows = [selected_flows]
             flow_summary = self.apply_selected_flows(flow_summary, selected_flows)
             flow_summary = self._apply_user_dynamic_flow_targets(flow_summary, params)
+            flow_summary = self._apply_external_flow_links(flow_summary, params)
             
             # Step 3: Fetch business use case
             active_jobs[job_id].update({'progress': 30, 'message': 'Fetching business use case...'})
@@ -236,7 +237,7 @@ class WebMUnitGenerator:
             for item in generation_outputs:
                 output_files.append(item["output_file"])
                 output_files.extend(item.get("extra_files", []))
-            output_files = self._dedupe_preserve_order(output_files)
+            output_files = self._collect_generated_output_files(output_path, output_files)
             output_file = output_files[0] if output_files else None
             
             # Step 8: Complete
@@ -432,6 +433,7 @@ class WebMUnitGenerator:
                     selected_flows = [selected_flows]
             flow_summary = self.apply_selected_flows(flow_summary, selected_flows)
             flow_summary = self._apply_user_dynamic_flow_targets(flow_summary, params)
+            flow_summary = self._apply_external_flow_links(flow_summary, params)
             
             # Step 3: Get business use case content
             active_jobs[job_id].update({'progress': 30, 'message': 'Processing documentation...'})
@@ -487,7 +489,7 @@ class WebMUnitGenerator:
             for item in generation_outputs:
                 output_files.append(item["output_file"])
                 output_files.extend(item.get("extra_files", []))
-            output_files = self._dedupe_preserve_order(output_files)
+            output_files = self._collect_generated_output_files(output_path, output_files)
             output_file = output_files[0] if output_files else None
             
             # Step 8: Complete
@@ -957,6 +959,18 @@ class WebMUnitGenerator:
             ]
         )
 
+    def _collect_generated_output_files(self, output_path: str, known_files: list) -> list:
+        """Include every generated Maven-layout file in results and downloads."""
+        files = list(known_files or [])
+        root = Path(output_path) if output_path else None
+        if root and root.is_dir():
+            files.extend(
+                str(path)
+                for path in sorted(root.rglob("*"))
+                if path.is_file()
+            )
+        return self._dedupe_preserve_order(files)
+
     def _select_dwl_context(self, flow_context: dict) -> dict:
         """Return only DWL files that are relevant to the current target flow."""
         project_dwl = getattr(self, "_project_dwl_files", {}) or {}
@@ -1228,6 +1242,7 @@ class WebMUnitGenerator:
             "missing_dependencies": [],
             "missing_plugins": [],
             "recommended_snippets": [],
+            "runtime_dependencies": [],
             "warnings": [],
             "errors": []
         }
@@ -1250,6 +1265,7 @@ class WebMUnitGenerator:
         properties = self._extract_pom_properties(root)
         dependencies = self._extract_pom_artifacts(root, "dependencies/dependency")
         plugins = self._extract_pom_artifacts(root, "build/plugins/plugin")
+        result["runtime_dependencies"] = self._runtime_dependency_hints(dependencies, properties)
 
         runner = self._find_artifact(dependencies, "org.mule.munit", "munit-runner")
         tools = self._find_artifact(dependencies, "org.mule.munit", "munit-tools")
@@ -1340,8 +1356,54 @@ class WebMUnitGenerator:
                 "artifactId": self._child_text(node, "artifactId"),
                 "version": self._child_text(node, "version"),
                 "scope": self._child_text(node, "scope"),
+                "type": self._child_text(node, "type"),
+                "classifier": self._child_text(node, "classifier"),
             })
         return artifacts
+
+    def _runtime_dependency_hints(self, dependencies: list, properties: dict) -> list:
+        """Return non-test Maven dependencies that may contribute Mule runtime flows."""
+        hints = []
+        ignored_groups = {
+            "org.mule.munit",
+            "com.mulesoft.munit",
+            "junit",
+            "org.junit.jupiter",
+            "org.mockito",
+        }
+        ignored_artifacts = {"munit-runner", "munit-tools"}
+        for dep in dependencies or []:
+            group_id = (dep.get("groupId") or "").strip()
+            artifact_id = (dep.get("artifactId") or "").strip()
+            scope = (dep.get("scope") or "").strip()
+            if not group_id or not artifact_id:
+                continue
+            if scope == "test" or group_id in ignored_groups or artifact_id in ignored_artifacts:
+                continue
+            version = self._resolve_pom_version(dep.get("version"), properties) or ""
+            packaging = (dep.get("type") or dep.get("classifier") or "jar").strip() or "jar"
+            extension = "jar"
+            if "mule-application" in packaging or "mule-plugin" in packaging:
+                extension = "jar"
+            local_path = self._maven_local_repo_path(group_id, artifact_id, version, extension)
+            hints.append({
+                "groupId": group_id,
+                "artifactId": artifact_id,
+                "version": version,
+                "scope": scope or "compile",
+                "type": packaging,
+                "coordinates": f"{group_id}:{artifact_id}:{version or '?'}",
+                "local_maven_path": local_path,
+            })
+        return hints[:20]
+
+    def _maven_local_repo_path(self, group_id: str, artifact_id: str, version: str, extension: str = "jar") -> str:
+        group_path = "/".join(part for part in group_id.split(".") if part)
+        file_version = version or "<version>"
+        return (
+            f"~/.m2/repository/{group_path}/{artifact_id}/{file_version}/"
+            f"{artifact_id}-{file_version}.{extension}"
+        )
 
     def _find_artifact(self, artifacts: list, group_id: str, artifact_id: str) -> Optional[dict]:
         """Find a dependency/plugin by exact Maven coordinates."""
@@ -1636,6 +1698,7 @@ class WebMUnitGenerator:
         )
         if not selected:
             return flow_summary
+        selected = selected[:1]
 
         filtered_summary = dict(flow_summary)
         filtered_summary["test_targets"] = selected
@@ -1724,6 +1787,167 @@ class WebMUnitGenerator:
             updated_summary["flow_contexts"] = merged_contexts
         return updated_summary
 
+    def _apply_external_flow_links(self, flow_summary: dict, params: dict) -> dict:
+        """
+        Link a missing dependency flow back to local flows when the user knows
+        that the dependency app calls them at runtime.
+
+        Example accepted input:
+        [{"externalFlow":"validate-shared-flow","linkedLocalFlows":["current-app-flow"]}]
+        """
+        links = self._build_external_flow_links_dict(params)
+        if not links:
+            return flow_summary
+
+        flow_graph = flow_summary.get("flow_graph", {}) or {}
+        if not flow_graph:
+            return flow_summary
+
+        selected = flow_summary.get("test_targets") or flow_summary.get("selected_flows") or []
+        if not selected:
+            selected = flow_summary.get("flows") or []
+
+        changed = False
+        for external_flow, local_flows in links.items():
+            external_node = flow_graph.get(external_flow)
+            if not external_node or not external_node.get("external_dependency"):
+                continue
+
+            valid_local_flows = [
+                name for name in self._dedupe_preserve_order(local_flows)
+                if name in flow_graph and not flow_graph.get(name, {}).get("external_dependency")
+            ]
+            if not valid_local_flows:
+                continue
+
+            external_node.setdefault("children", [])
+            external_node.setdefault("processor_chain", [])
+            external_node["external_linked_local_flows"] = self._dedupe_preserve_order(
+                list(external_node.get("external_linked_local_flows", []) or []) + valid_local_flows
+            )
+
+            existing_linked_refs = {
+                item.get("name") or item.get("ref") or item.get("target")
+                for item in external_node.get("processor_chain", []) or []
+                if item.get("type") == "flow-ref" and item.get("external_bridge")
+            }
+            for local_flow in valid_local_flows:
+                if local_flow not in external_node["children"]:
+                    external_node["children"].append(local_flow)
+                local_node = flow_graph.get(local_flow)
+                if local_node is not None and external_flow not in local_node.get("parents", []):
+                    local_node.setdefault("parents", []).append(external_flow)
+                if local_flow not in existing_linked_refs:
+                    external_node["processor_chain"].append({
+                        "index": len(external_node.get("processor_chain", [])) + 1,
+                        "type": "flow-ref",
+                        "doc_name": f"Linked local flow {local_flow}",
+                        "name": local_flow,
+                        "flow": external_flow,
+                        "external_bridge": True,
+                    })
+                    existing_linked_refs.add(local_flow)
+                changed = True
+
+        if not changed:
+            return flow_summary
+
+        updated_summary = dict(flow_summary)
+        updated_summary["flow_graph"] = flow_graph
+        if selected:
+            rebuilt_contexts = self.xml_analyzer._build_flow_contexts(selected, flow_graph)
+            merged_contexts = dict(flow_summary.get("flow_contexts", {}) or {})
+            merged_contexts.update(rebuilt_contexts)
+            updated_summary["flow_contexts"] = merged_contexts
+        return updated_summary
+
+    def _build_external_flow_links_dict(self, params: dict) -> Dict[str, List[str]]:
+        raw_values = []
+        ftd = self._build_flow_test_data_dict(params)
+        if ftd.get("externalFlowLinks"):
+            raw_values.append(ftd.get("externalFlowLinks"))
+        for key in ("external_flow_links", "externalFlowLinks"):
+            value = params.get(key)
+            if isinstance(value, str) and value.strip():
+                raw_values.append(value.strip())
+
+        links: Dict[str, List[str]] = {}
+        for raw in raw_values:
+            for external_flow, local_flows in self._parse_external_flow_links(raw).items():
+                links.setdefault(external_flow, [])
+                links[external_flow] = self._dedupe_preserve_order(links[external_flow] + local_flows)
+        return links
+
+    def _parse_external_flow_links(self, raw: Any) -> Dict[str, List[str]]:
+        if raw is None:
+            return {}
+
+        def clean(value: Any) -> str:
+            return str(value or "").strip().strip("'\"")
+
+        text = ""
+        if isinstance(raw, (list, dict)):
+            parsed = raw
+        else:
+            text = str(raw or "").strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+
+        result: Dict[str, List[str]] = {}
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                external_flow = clean(
+                    item.get("externalFlow")
+                    or item.get("external_flow")
+                    or item.get("dependencyFlow")
+                    or item.get("flow")
+                )
+                local_values = (
+                    item.get("linkedLocalFlows")
+                    or item.get("linked_local_flows")
+                    or item.get("internalFlows")
+                    or item.get("localFlows")
+                    or item.get("calls")
+                    or []
+                )
+                if isinstance(local_values, str):
+                    local_values = re.split(r"[\n,]+", local_values)
+                if external_flow:
+                    result.setdefault(external_flow, [])
+                    result[external_flow].extend(clean(value) for value in local_values if clean(value))
+        elif isinstance(parsed, dict):
+            for external_flow, value in parsed.items():
+                local_values = value if isinstance(value, list) else [value]
+                external_key = clean(external_flow)
+                if external_key:
+                    result.setdefault(external_key, [])
+                    result[external_key].extend(clean(item) for item in local_values if clean(item))
+        else:
+            # Compact text form: externalFlow -> localA, localB
+            for line in text.splitlines():
+                if "->" not in line:
+                    continue
+                left, right = line.split("->", 1)
+                external_flow = clean(left)
+                if not external_flow:
+                    continue
+                result.setdefault(external_flow, [])
+                result[external_flow].extend(
+                    clean(part) for part in re.split(r"[,]+", right) if clean(part)
+                )
+
+        return {
+            external_flow: self._dedupe_preserve_order([name for name in local_flows if name])
+            for external_flow, local_flows in result.items()
+            if external_flow and local_flows
+        }
+
     def _build_dynamic_flow_targets_dict(self, params: dict) -> Dict[str, List[str]]:
         """Parse user answers for unresolved dynamic flow-ref targets."""
         raw_values = []
@@ -1797,6 +2021,7 @@ class WebMUnitGenerator:
     def build_flow_selection_payload(self, flow_summary: dict) -> dict:
         """Build UI-friendly flow selection metadata."""
         contexts = flow_summary.get("flow_contexts", {}) or {}
+        flow_graph = flow_summary.get("flow_graph", {}) or {}
         recommended = flow_summary.get("test_targets", []) or []
         flows_payload = []
 
@@ -1833,6 +2058,11 @@ class WebMUnitGenerator:
                 "related_flows": context.get("related_flows", []),
                 "execution_flows": context.get("execution_flows", []),
                 "unresolved_flow_refs": context.get("unresolved_flow_refs", []),
+                "dynamic_flow_sources": context.get("dynamic_flow_sources", []),
+                "external_flow_refs": context.get("external_flow_refs", []),
+                "external_flow_names": context.get("external_flow_names", []),
+                "external_assisted_flow_names": context.get("external_assisted_flow_names", []),
+                "munit_enable_flow_sources": context.get("munit_enable_flow_sources", []),
                 "recommended": is_recommended,
                 "selection_reason": self._describe_flow_selection_reason(context, is_recommended)
             })
@@ -1843,6 +2073,7 @@ class WebMUnitGenerator:
         categories = {
             "entry_point": [],
             "api_resource": [],
+            "external": [],
             "unreachable": [],
             "internal": [],
         }
@@ -1850,7 +2081,12 @@ class WebMUnitGenerator:
             name = flow["name"]
             has_source = flow.get("is_parent_flow") or flow.get("has_source_listener")
             has_parent = bool(flow.get("parent_flows"))
-            if has_source:
+            is_external = flow.get("type") == "external-dependency-flow" or bool(
+                (flow_graph.get(name, {}) or {}).get("external_dependency")
+            )
+            if is_external:
+                categories["external"].append(name)
+            elif has_source:
                 categories["entry_point"].append(name)
             elif self._is_apikit_resource_name(name):
                 categories["api_resource"].append(name)
@@ -1870,6 +2106,8 @@ class WebMUnitGenerator:
 
         entry_point_flows  = _group(categories["entry_point"])
         api_resource_flows = _group(categories["api_resource"])
+        external_flows     = _group(categories["external"])
+        internal_flows     = _group(categories["internal"])
         unreachable_flows  = _group(categories["unreachable"])
 
         # Add flow_category field to every flow so the UI can group them
@@ -1877,6 +2115,14 @@ class WebMUnitGenerator:
             f["flow_category"] = "entry_point"
         for f in api_resource_flows:
             f["flow_category"] = "api_resource"
+        for f in external_flows:
+            f["flow_category"] = "external"
+            f["selection_reason"] = (
+                "Called by this app but XML is not present in the uploaded ZIP; "
+                "treat as a parent/dependency Mule app flow."
+            )
+        for f in internal_flows:
+            f["flow_category"] = "internal"
         for f in unreachable_flows:
             f["flow_category"] = "unreachable"
 
@@ -1887,6 +2133,8 @@ class WebMUnitGenerator:
             "job_type":           flow_summary.get("job_type", "Generic Mule Flow"),
             "entry_point_flows":  entry_point_flows,
             "api_resource_flows": api_resource_flows,
+            "external_flows":     external_flows,
+            "internal_flows":     internal_flows,
             "unreachable_flows":  unreachable_flows,
             # Keep legacy keys so other parts of the app still work
             "recommended_flows":  recommended_flows,
@@ -1948,22 +2196,21 @@ class WebMUnitGenerator:
                     "action":          action,
                     "position":        len(connectors) + 1,
                 })
-            return connectors
-
-        # ── Fallback: mock_plan from single-flow analysis ─────────────────────
+        # ── Merge mock_plan so external flow-ref mocks are not hidden by traversal data ──
         for index, item in enumerate(context.get("mock_plan", []) or [], start=1):
             if item.get("action") not in ("mock-when", "spy"):
                 continue
             processor = item.get("processor", "connector")
             doc_name  = item.get("doc_name") or item.get("match_value") or processor
-            key = f"{processor}::{flow_name}::{doc_name}"
+            source_flow = item.get("flow") or item.get("source_flow") or flow_name
+            key = f"{processor}::{source_flow}::{doc_name}"
             if key in seen_keys:
                 continue
             seen_keys.add(key)
             connectors.append({
                 "id":              self._connector_sample_key(flow_name, item),
-                "flow":            flow_name,
-                "source_flow":     flow_name,
+                "flow":            source_flow,
+                "source_flow":     source_flow,
                 "depth":           0,
                 "processor":       processor,
                 "doc_name":        doc_name,
@@ -1971,9 +2218,15 @@ class WebMUnitGenerator:
                 "match_value":     item.get("match_value") or doc_name,
                 "media_type":      item.get("media_type", "application/json"),
                 "result_shape":    item.get("result_shape", "object"),
-                "display_name":    f"{doc_name} ({processor})",
+                "display_name":    (
+                    f"{doc_name} ({processor})"
+                    + (f" — external {item.get('external_flow')}" if item.get("external_flow") else "")
+                ),
                 "action":          item.get("action", "mock-when"),
                 "position":        index,
+                "external_dependency": bool(item.get("external_dependency")),
+                "external_flow":   item.get("external_flow", ""),
+                "reason":          item.get("reason", ""),
             })
         return connectors
 
@@ -2028,6 +2281,74 @@ class WebMUnitGenerator:
             }
             for item in scenarios
         ]
+
+    def build_selected_flow_trace_payload(
+        self,
+        flow_summary: dict,
+        selected_flows: list,
+        build_validation: Optional[dict] = None,
+    ) -> dict:
+        """Build the UI payload for selected-flow trace review and external stops."""
+        contexts = flow_summary.get("flow_contexts", {}) or {}
+        flow_graph = flow_summary.get("flow_graph", {}) or {}
+        selected = (
+            flow_summary.get("selected_flows")
+            or selected_flows
+            or flow_summary.get("test_targets")
+            or []
+        )
+        local_flows = sorted(
+            [
+                name for name, node in flow_graph.items()
+                if not (node or {}).get("external_dependency")
+            ],
+            key=str.lower,
+        )
+        dependency_hints = (build_validation or {}).get("runtime_dependencies", []) or []
+
+        traces = []
+        external_stops = []
+        seen_stops = set()
+        for flow_name in selected:
+            context = contexts.get(flow_name, {}) or {}
+            execution_flows = context.get("execution_flows", []) or [flow_name]
+            trace_nodes = []
+            for name in execution_flows:
+                node = flow_graph.get(name, {}) or {}
+                is_external = bool(node.get("external_dependency"))
+                trace_nodes.append({
+                    "name": name,
+                    "type": node.get("type") or context.get("target_type") or "flow",
+                    "source_file": node.get("source_file", "unknown.xml"),
+                    "external": is_external,
+                    "linked_local_flows": node.get("external_linked_local_flows", []) or [],
+                })
+                if is_external and name not in seen_stops:
+                    seen_stops.add(name)
+                    external_stops.append({
+                        "flow": name,
+                        "called_from": node.get("parents", []) or context.get("parent_flows", []),
+                        "dependency_hint": dependency_hints[0] if dependency_hints else {},
+                        "dependency_hints": dependency_hints[:5],
+                        "message": (
+                            f"Flow {name} is from a runtime dependency or shared Mule module. "
+                            "Its XML is not present in the uploaded app, so I cannot automatically trace inside it."
+                        ),
+                    })
+            traces.append({
+                "flow": flow_name,
+                "execution_flows": execution_flows,
+                "nodes": trace_nodes,
+                "external_flow_refs": context.get("external_flow_refs", []) or [],
+                "munit_enable_flow_sources": context.get("munit_enable_flow_sources", []) or [],
+            })
+
+        return {
+            "traces": traces,
+            "external_stops": external_stops,
+            "local_flow_candidates": local_flows,
+            "dependency_hints": dependency_hints[:10],
+        }
 
     def _build_munit_plan_preview(self, context: dict) -> dict:
         """Return a compact Behavior / Execution / Validation preview for the UI."""
@@ -2224,6 +2545,8 @@ class WebMUnitGenerator:
                     combined["response"] = json.loads(expected_text)
                 except Exception:
                     combined["response"] = expected_text
+            if ftd.get("statusCode"):
+                combined["statusCode"] = str(ftd["statusCode"])
             if ftd.get("queryParams"):
                 combined["queryParams"] = ftd["queryParams"]
             if ftd.get("uriParams"):
@@ -2458,12 +2781,45 @@ class WebMUnitGenerator:
                 flow = (val.get("flow") or val.get("flowName") or "_all").strip() or "_all"
                 inp = (val.get("input")  or "").strip()
                 out = (val.get("output") or "").strip()
-                if not (inp or out):
+                variables = (val.get("variables") or "").strip()
+                return_attributes = (val.get("returnAttributes") or val.get("return_attributes") or "").strip()
+                error_type = (val.get("errorType") or val.get("error_type") or "").strip()
+                return_types = val.get("returnTypes") or val.get("return_types") or []
+                if isinstance(return_types, str):
+                    return_types = [item.strip() for item in return_types.split(",") if item.strip()]
+                return_types = [
+                    str(item).strip()
+                    for item in return_types
+                    if str(item).strip() in {"payload", "variables", "attributes", "error", "nothing"}
+                ]
+                inferred_return_types = []
+                if out:
+                    inferred_return_types.append("payload")
+                if variables:
+                    inferred_return_types.append("variables")
+                if return_attributes:
+                    inferred_return_types.append("attributes")
+                if error_type:
+                    inferred_return_types.append("error")
+                if error_type:
+                    return_types = ["error"]
+                elif inferred_return_types:
+                    return_types = [item for item in return_types if item not in {"nothing", "error"}]
+                    for item in inferred_return_types:
+                        if item not in return_types:
+                            return_types.append(item)
+                if not (inp or out or variables or return_attributes or error_type or return_types):
                     continue
                 samples.setdefault(flow, {})[sample_key] = {
                     "request":    inp,
                     "response":   out,
                     "media_type": _detect_media_type(out or inp),
+                    "return_types": return_types,
+                    "variables": variables,
+                    "return_attributes": return_attributes,
+                    "error_type": error_type,
+                    "external_dependency": bool(val.get("external_dependency")),
+                    "external_flow": (val.get("external_flow") or "").strip(),
                 }
             return samples
 
@@ -2643,6 +2999,35 @@ def _prune_analysis_cache(max_entries: int = 12, ttl_seconds: int = 3600) -> Non
         key=lambda item: float(item[1].get('created_at', 0)),
     )[:len(analysis_cache) - max_entries]:
         analysis_cache.pop(key, None)
+
+def _read_dependency_artifact(file) -> dict:
+    """Read a dependency artifact upload as Mule XML content."""
+    if not file or not getattr(file, "filename", ""):
+        return {"combined_xml": "", "xml_count": 0, "scan_details": {}}
+
+    filename = file.filename.lower()
+    if filename.endswith((".zip", ".jar")):
+        import shutil
+        import zipfile
+        temp_dir = tempfile.mkdtemp(prefix="mule_dependency_")
+        try:
+            archive_path = os.path.join(temp_dir, secure_filename(file.filename) or "dependency.jar")
+            file.save(archive_path)
+            with zipfile.ZipFile(archive_path, "r") as zip_ref:
+                zip_ref.extractall(temp_dir)
+            return generator._collect_project_files(temp_dir, include_dwl=False)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    if filename.endswith((".xml", ".mule")):
+        content = generator._read_file_content(file)
+        return {
+            "combined_xml": f"\n\n--- Dependency XML from {file.filename} ---\n{content}\n",
+            "xml_count": 1 if content.strip() else 0,
+            "scan_details": {"mule_files": [file.filename]},
+        }
+
+    raise Exception("Dependency artifact must be a .jar, .zip, .xml, or .mule file.")
 
 def _analysis_fingerprint(params: dict) -> str:
     """Stable fingerprint for analyzed Mule project content used by resume cache."""
@@ -3030,6 +3415,74 @@ def analyze_enhanced_flows():
             'error': str(e)
         }), 500
 
+@app.route('/api/enhanced/resolve-selected-flow', methods=['POST'])
+def resolve_selected_flow_context():
+    """Trace selected flows and optionally resolve external stops using an uploaded artifact or manual links."""
+    try:
+        params = request.form.to_dict()
+        files = request.files.to_dict()
+        analysis_id = (params.get("analysis_id") or "").strip()
+        cached = analysis_cache.get(analysis_id) if analysis_id else None
+        if not cached:
+            return jsonify({
+                "success": False,
+                "error": "Cached flow analysis is no longer available. Please analyze the app again."
+            }), 409
+
+        selected_flows = params.get("selected_flows") or []
+        if isinstance(selected_flows, str):
+            try:
+                selected_flows = json.loads(selected_flows)
+            except Exception:
+                selected_flows = [item.strip() for item in selected_flows.split(",") if item.strip()]
+
+        xml_file = cached.get("xml_file", "")
+        build_validation = cached.get("build_validation", {}) or {}
+        project_scan = cached.get("project_scan", {}) or {}
+
+        dependency_file = files.get("dependency_artifact")
+        if dependency_file and getattr(dependency_file, "filename", ""):
+            dep_project = _read_dependency_artifact(dependency_file)
+            if dep_project.get("combined_xml", "").strip():
+                xml_file = (
+                    xml_file
+                    + f"\n\n--- Dependency artifact from {dependency_file.filename} ---\n"
+                    + dep_project["combined_xml"]
+                )
+                project_scan = dict(project_scan)
+                project_scan.setdefault("dependency_artifacts", []).append({
+                    "filename": dependency_file.filename,
+                    "xml_count": dep_project.get("xml_count", 0),
+                    "mule_files": (dep_project.get("scan_details") or {}).get("mule_files", []),
+                })
+
+        flow_summary = generator.xml_analyzer.analyze_mule_project(xml_file)
+        flow_summary = generator.apply_selected_flows(flow_summary, selected_flows)
+        flow_summary = generator._apply_user_dynamic_flow_targets(flow_summary, params)
+        flow_summary = generator._apply_external_flow_links(flow_summary, params)
+
+        cached.update({
+            "xml_file": xml_file,
+            "flow_summary": flow_summary,
+            "build_validation": build_validation,
+            "project_scan": project_scan,
+            "created_at": time.time(),
+        })
+        selection_payload = generator.build_flow_selection_payload(flow_summary)
+        return jsonify({
+            "success": True,
+            "selection": selection_payload,
+            "selected_flow_trace": generator.build_selected_flow_trace_payload(
+                flow_summary,
+                selected_flows,
+                build_validation,
+            ),
+            "build_validation": build_validation,
+            "project_scan": project_scan,
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route('/api/generate', methods=['POST'])
 def generate_munit():
     """Generate MUnit test suite."""
@@ -3300,17 +3753,25 @@ def download_file(job_id):
     """Download generated MUnit files."""
     if job_id in job_results and job_results[job_id]['success']:
         result = job_results[job_id]
+        output_root = Path(result.get('output_path') or '').resolve() if result.get('output_path') else None
+        download_files = list(result.get('output_files') or [])
+        if output_root and output_root.is_dir():
+            download_files.extend(
+                str(path)
+                for path in sorted(output_root.rglob("*"))
+                if path.is_file()
+            )
+        download_files = list(dict.fromkeys(download_files))
         
         # If multiple files were generated, create a ZIP
-        if result.get('output_files') and len(result['output_files']) > 1:
+        if len(download_files) > 1:
             import zipfile
             import io
             
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                 used_names = set()
-                output_root = Path(result.get('output_path') or '').resolve() if result.get('output_path') else None
-                for output_file in result['output_files']:
+                for output_file in download_files:
                     if os.path.exists(output_file):
                         file_path = Path(output_file).resolve()
                         try:
@@ -3339,7 +3800,7 @@ def download_file(job_id):
             )
         else:
             # Single file download
-            output_file = result.get('output_file')
+            output_file = download_files[0] if download_files else result.get('output_file')
             if output_file and os.path.exists(output_file):
                 return send_file(output_file, as_attachment=True)
     

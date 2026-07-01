@@ -2472,6 +2472,50 @@ def test_error_handler_failure_uses_payload_assertion_not_expected_error(tmp_pat
     assert '"message": "backend failed"' in failure_assert
 
 
+def test_on_error_propagate_with_response_transform_keeps_expected_error_type(tmp_path):
+    builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
+    flow_context = {
+        "target_flow": "weather-experience-flow",
+        "error_handlers": ["on-error-propagate"],
+        "error_handler_details": [
+            {
+                "type": "on-error-propagate",
+                "error_type": "HTTP:CONNECTIVITY, HTTP:TIMEOUT",
+                "dwl_excerpt": (
+                    "%dw 2.0\noutput application/json\n---\n"
+                    '{ status: "ERROR", message: "Open-Meteo unavailable" }'
+                ),
+            }
+        ],
+        "set_event_plan": {
+            "payload_expression": "{}",
+            "payload_media_type": "application/json",
+            "attributes_template": {"method": "POST", "requestPath": "/api/weather"},
+        },
+        "mock_plan": [
+            {
+                "action": "mock-when",
+                "processor": "http:request",
+                "doc_name": "GET Open-Meteo Forecast",
+                "match_attribute": "doc:name",
+                "match_value": "GET Open-Meteo Forecast",
+                "return_attributes": {"statusCode": 200},
+                "media_type": "application/json",
+            }
+        ],
+    }
+
+    suite_xml, metadata = builder.build_suite(flow_context, generation_mode="recorder")
+
+    failure_test = suite_xml.split(
+        'name="weather-experience-flow-get-open-meteo-forecast-failure-test"',
+        1,
+    )[1].split("</munit:test>", 1)[0]
+    assert 'expectedErrorType="HTTP:CONNECTIVITY"' in failure_test
+    assert "Assert error response" not in failure_test
+    assert metadata["munit_plan"]["validation"][2]["expectedErrorType"] == "HTTP:CONNECTIVITY"
+
+
 def test_logger_only_error_handler_uses_expected_error_and_verify_call(tmp_path):
     builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
     flow_context = {

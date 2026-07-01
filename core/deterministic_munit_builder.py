@@ -28,7 +28,6 @@ MUNIT_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
         http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
 
     <munit:config name="{suite_name}"/>
-{enable_flow_sources}
 
 {tests}
 
@@ -77,7 +76,6 @@ class DeterministicMUnitBuilder:
             connector_samples=connector_samples or {},
         )
         enabled_flow_sources = self._enabled_flow_sources(flow_context)
-        enable_flow_sources_xml = self._render_enable_flow_sources(enabled_flow_sources)
 
         resource_files: Dict[str, str] = {}
         tests_xml: List[str] = []
@@ -93,13 +91,13 @@ class DeterministicMUnitBuilder:
                 sample_payload=sample_payload,
                 connector_samples=connector_samples or {},
                 recorder_style=(generation_mode == "recorder"),
+                enabled_flow_sources=enabled_flow_sources,
             )
             tests_xml.append(test_xml)
             resource_files.update(files)
 
         suite_xml = MUNIT_XML_TEMPLATE.format(
             suite_name=suite_name,
-            enable_flow_sources=enable_flow_sources_xml,
             tests="\n".join(tests_xml),
         )
         suite_xml, resource_files = self._dedupe_reusable_resource_files(suite_xml, resource_files)
@@ -135,7 +133,7 @@ class DeterministicMUnitBuilder:
         target_flow = flow_context.get("target_flow", "main-flow")
         set_event_plan = flow_context.get("set_event_plan") or {}
         required_inputs = flow_context.get("required_inputs") or {}
-        mock_plan = flow_context.get("mock_plan") or []
+        mock_plan = self._dedupe_mock_plan(flow_context.get("mock_plan") or [])
         warnings = []
 
         behavior_mocks = []
@@ -241,14 +239,33 @@ class DeterministicMUnitBuilder:
         if not flow_names:
             return ""
         rows = "\n".join(
-            f'        <munit:enable-flow-source value="{self._xml_escape(flow_name)}"/>'
+            f'            <munit:enable-flow-source value="{self._xml_escape(flow_name)}"/>'
             for flow_name in flow_names
         )
-        return f"""
-    <munit:enable-flow-sources>
+        return f"""        <munit:enable-flow-sources>
 {rows}
-    </munit:enable-flow-sources>
+        </munit:enable-flow-sources>
 """
+
+    def _dedupe_mock_plan(self, mock_plan: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Keep one mock/verification for each effective MUnit matcher."""
+        deduped: List[Dict[str, Any]] = []
+        seen = set()
+        for item in mock_plan or []:
+            processor = str(item.get("processor") or "").strip()
+            action = str(item.get("action") or "").strip()
+            match_attribute = str(item.get("match_attribute") or "doc:name").strip()
+            match_value = str(
+                item.get("match_value")
+                or item.get("doc_name")
+                or processor
+            ).strip()
+            key = (action, processor, match_attribute, match_value)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
 
     def _build_spy_plan(self, flow_context: Dict[str, Any]) -> List[Dict[str, str]]:
         """Plan optional spies for named DataWeave/transform processors."""
@@ -297,7 +314,7 @@ class DeterministicMUnitBuilder:
                 "security_note": "Provide synthetic or masked data only. Do not include secrets or production PII.",
             })
 
-        for item in flow_context.get("mock_plan", []) or []:
+        for item in self._dedupe_mock_plan(flow_context.get("mock_plan", []) or []):
             if item.get("action") != "mock-when":
                 continue
             key = self._connector_sample_key(flow_context.get("target_flow", ""), item)
@@ -311,9 +328,19 @@ class DeterministicMUnitBuilder:
                 "connector_key": key,
                 "processor": item.get("processor", ""),
                 "doc_name": item.get("doc_name") or item.get("match_value") or item.get("processor", ""),
-                "title": "Provide mock response for external connector",
+                "external_flow": item.get("external_flow", ""),
+                "title": (
+                    "Provide mock response for external dependency flow"
+                    if item.get("external_dependency")
+                    else "Provide mock response for external connector"
+                ),
                 "sample_kind": "connector_response",
-                "reason": "This external connector will be mocked. Provide the synthetic response body that this connector should return during the MUnit test.",
+                "reason": (
+                    f"Flow `{item.get('external_flow')}` is called by this app, but its XML is not present in the uploaded ZIP. "
+                    "Provide the synthetic response body that this dependency flow should return."
+                    if item.get("external_dependency")
+                    else "This external connector will be mocked. Provide the synthetic response body that this connector should return during the MUnit test."
+                ),
                 "security_note": "Provide a synthetic response sample. The agent must not call live systems.",
             })
 
@@ -331,7 +358,15 @@ class DeterministicMUnitBuilder:
             })
 
         if not sample_payload and not any(item.get("type") == "sample_request_response" for item in requests):
-            requests.extend(self._synthetic_default_clarification_requests(flow_context))
+            requests.append({
+                "type": "sample_request_response",
+                "flow": flow_context.get("target_flow", ""),
+                "title": "Additional Sample Test Data",
+                "sample_kind": "request_response",
+                "reason": "Provide the flow input and expected output samples. Add query parameters, URI parameters, and headers when the flow requires them.",
+                "requested_fields": requested_input_fields,
+                "security_note": "Provide synthetic or masked data only. Do not include secrets or production PII.",
+            })
         return requests[:8]
 
     def _synthetic_default_clarification_requests(self, flow_context: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -548,6 +583,10 @@ class DeterministicMUnitBuilder:
             return "set-event-payload"
         if name.startswith("set-event_attributes") or name.startswith("set_event_attributes"):
             return "set-event-attributes"
+        if name.startswith("mock_") and name.endswith("_variables.dwl"):
+            # Keep variable resource names stable. The XML variable expressions
+            # reference the exact scenario-specific file path.
+            return f"mock-variables:{name}"
         if name.startswith("mock_") and name.endswith("_attributes.dwl"):
             return "mock-attributes"
         if name.startswith("mock_"):
@@ -666,14 +705,19 @@ class DeterministicMUnitBuilder:
 
             for item in mock_plan[:3]:
                 processor = item.get("processor", "")
-                assertion_strategy = self._error_handler_assertion_strategy(flow_context) if has_error_handler else "expected_error"
+                expected_error_type = self._error_type_for_processor(processor)
+                assertion_strategy = (
+                    self._error_handler_assertion_strategy(flow_context, expected_error_type)
+                    if has_error_handler
+                    else "expected_error"
+                )
                 planned.append({
                     "name": f"{self._slugify(item.get('doc_name') or processor)}_failure",
                     "type": "downstream_failure",
                     "description": f"{item.get('doc_name') or processor} failure path",
                     "failed_processor": processor,
                     "failed_match_value": item.get("match_value") or item.get("doc_name"),
-                    "expected_error_type": self._error_type_for_processor(processor),
+                    "expected_error_type": expected_error_type,
                     "assertion_strategy": assertion_strategy,
                     "verify_error_handler": has_error_handler,
                 })
@@ -735,10 +779,22 @@ class DeterministicMUnitBuilder:
                 return True
         return False
 
-    def _error_handler_assertion_strategy(self, flow_context: Dict[str, Any]) -> str:
-        """Use payload assertions only when the handler actually builds a response."""
+    def _error_handler_assertion_strategy(
+        self,
+        flow_context: Dict[str, Any],
+        expected_error_type: str = "",
+    ) -> str:
+        """Use payload assertions only when a matching continue handler consumes the error."""
         for handler in flow_context.get("error_handler_details", []) or []:
-            if self._error_handler_has_response_logic(handler):
+            handler_error_type = handler.get("error_type") or handler.get("match_type") or ""
+            if (
+                handler_error_type
+                and expected_error_type
+                and not self._handler_matches_error_type(handler_error_type, expected_error_type)
+            ):
+                continue
+            handler_kind = str(handler.get("type") or "").lower()
+            if "on-error-continue" in handler_kind and self._error_handler_has_response_logic(handler):
                 return "error_handler_response"
         return "expected_error"
 
@@ -831,6 +887,29 @@ class DeterministicMUnitBuilder:
             resource_path.write_text(content, encoding="utf-8")
             paths[rel_name] = str(resource_path)
 
+        referenced_resources = re.findall(
+            r"MunitTools::getResourceAsString\('([^']+)'\)",
+            suite_xml or "",
+        )
+        generated_prefix = f"{resource_folder}/"
+        resource_contents = metadata.get("resource_files") or {}
+        for reference in referenced_resources:
+            if not reference.startswith(generated_prefix):
+                continue
+            referenced_path = self.output_dir / "src" / "test" / "resources" / reference
+            relative_name = reference[len(generated_prefix):]
+            if not referenced_path.is_file() and relative_name in resource_contents:
+                referenced_path.parent.mkdir(parents=True, exist_ok=True)
+                referenced_path.write_text(resource_contents[relative_name], encoding="utf-8")
+            if not referenced_path.is_file():
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Generated MUnit references an unavailable resource: %s",
+                    reference,
+                )
+                continue
+            paths.setdefault(reference, str(referenced_path))
+
         paths["suite_file_maven"] = str(suite_path)
         return paths
 
@@ -845,6 +924,7 @@ class DeterministicMUnitBuilder:
         sample_payload: Optional[str],
         connector_samples: Dict[str, Dict[str, str]],
         recorder_style: bool,
+        enabled_flow_sources: Optional[List[str]] = None,
     ) -> Tuple[str, Dict[str, str]]:
         target_flow = flow_context.get("target_flow", "main-flow")
         scenario_slug = self._slugify(scenario.get("name") or scenario.get("type") or f"scenario-{index}")
@@ -916,8 +996,9 @@ class DeterministicMUnitBuilder:
             else ""
         )
 
+        enable_flow_sources_xml = self._render_enable_flow_sources(enabled_flow_sources or [])
         test_xml = f"""    <munit:test name="{test_name}" description="{self._xml_escape(description)}"{expected_error}>
-{behavior_xml}        <munit:execution>
+{enable_flow_sources_xml}{behavior_xml}        <munit:execution>
 {set_event_xml}
             <flow-ref doc:name="Execute {self._xml_escape(target_flow)}" name="{self._xml_escape(target_flow)}"/>
         </munit:execution>
@@ -1039,7 +1120,7 @@ class DeterministicMUnitBuilder:
     ) -> Tuple[List[str], Dict[str, str]]:
         parts: List[str] = []
         files: Dict[str, str] = {}
-        mock_plan = flow_context.get("mock_plan", []) or []
+        mock_plan = self._dedupe_mock_plan(flow_context.get("mock_plan", []) or [])
         scenario_type = scenario.get("type", "happy_path")
 
         if scenario.get("terminates_with_error") or scenario_type in {"empty_payload", "invalid_input", "validation_error"}:
@@ -1075,6 +1156,27 @@ class DeterministicMUnitBuilder:
 
             mock_file = f"mock_{self._slugify(doc_name)}_{resource_suffix}_{mock_index}.dwl"
             sample = connector_samples.get(self._connector_sample_key(flow_context.get("target_flow", ""), item), {})
+            if processor == "flow-ref" or item.get("external_dependency"):
+                then_return_xml, return_files = self._build_external_flow_ref_return(
+                    item,
+                    scenario,
+                    scenario_type,
+                    flow_context,
+                    sample,
+                    resource_folder,
+                    resource_suffix,
+                    mock_index,
+                )
+                files.update(return_files)
+                parts.append(
+                    f"""            <munit-tools:mock-when doc:name="Mock {self._xml_escape(doc_name)}" processor="{processor}">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute attributeName="{self._xml_escape(match_attr)}" whereValue="{self._xml_escape(match_value)}"/>
+                </munit-tools:with-attributes>{then_return_xml}
+            </munit-tools:mock-when>"""
+                )
+                continue
+
             mock_body = self._build_mock_payload_dwl(item, scenario_type, flow_context, sample=sample, scenario=scenario)
             files[mock_file] = mock_body
             mock_media_type = self._infer_resource_media_type(
@@ -1098,6 +1200,127 @@ class DeterministicMUnitBuilder:
             )
         return parts, files
 
+    def _build_external_flow_ref_return(
+        self,
+        item: Dict[str, Any],
+        scenario: Dict[str, Any],
+        scenario_type: str,
+        flow_context: Dict[str, Any],
+        sample: Dict[str, Any],
+        resource_folder: str,
+        resource_suffix: str,
+        mock_index: int,
+    ) -> Tuple[str, Dict[str, str]]:
+        """Render the event components returned by a mocked external flow-ref."""
+        files: Dict[str, str] = {}
+        return_types = [
+            str(value).strip()
+            for value in (sample.get("return_types") or [])
+            if str(value).strip()
+        ]
+        if not return_types:
+            # Preserve behavior for old connector samples that only supplied output.
+            return_types = ["payload", "attributes"]
+
+        if "nothing" in return_types:
+            return "", files
+
+        if "error" in return_types:
+            error_type = sample.get("error_type") or self._error_type_for_processor("flow-ref")
+            return (
+                f"""
+                <munit-tools:then-return>
+                    <munit-tools:error typeId="{self._xml_escape(str(error_type))}"/>
+                </munit-tools:then-return>""",
+                files,
+            )
+
+        children: List[str] = []
+        doc_name = item.get("doc_name") or item.get("match_value") or "external-flow"
+        resource_base = f"mock_{self._slugify(doc_name)}_{resource_suffix}_{mock_index}"
+
+        if "payload" in return_types:
+            payload_file = f"{resource_base}.dwl"
+            payload_body = self._build_mock_payload_dwl(
+                item,
+                scenario_type,
+                flow_context,
+                sample=sample,
+                scenario=scenario,
+            )
+            files[payload_file] = payload_body
+            payload_media_type = self._infer_resource_media_type(
+                payload_body,
+                sample.get("media_type") or item.get("media_type"),
+            )
+            children.append(
+                f"""                    <munit-tools:payload value="#[MunitTools::getResourceAsString('{resource_folder}/{payload_file}')]" mediaType="{payload_media_type}"/>"""
+            )
+
+        if "variables" in return_types:
+            variables = self._parse_json_object(sample.get("variables"))
+            if variables:
+                # Returned variables belong to the mocked flow-ref, not to an
+                # individual doc:name or generated scenario. Reuse one file
+                # named from the actual external target flow in every test.
+                external_flow_name = (
+                    item.get("external_flow")
+                    or item.get("match_value")
+                    or doc_name
+                )
+                variables_file = (
+                    f"mock_{self._slugify(str(external_flow_name))}_variables.dwl"
+                )
+                files[variables_file] = self._build_mock_resource_content(variables)
+                variable_rows_list = []
+                for key in variables:
+                    variable_expression = (
+                        f"#[read(MunitTools::getResourceAsString('{resource_folder}/{variables_file}'), "
+                        f"'application/json')[{json.dumps(str(key))}]]"
+                    )
+                    variable_rows_list.append(
+                        f"""                            <munit-tools:variable key="{self._xml_escape(str(key))}" value="{self._xml_escape(variable_expression)}"/>"""
+                    )
+                variable_rows = "\n".join(variable_rows_list)
+                children.append(
+                    f"""                    <munit-tools:variables>
+{variable_rows}
+                    </munit-tools:variables>"""
+                )
+
+        if "attributes" in return_types:
+            attributes = self._parse_json_object(sample.get("return_attributes"))
+            if not attributes:
+                attributes = item.get("return_attributes") or {"statusCode": 200}
+            attributes_file = f"{resource_base}_attributes.dwl"
+            files[attributes_file] = self._build_mock_resource_content(attributes)
+            attributes_media_type = self._infer_attributes_media_type(files[attributes_file])
+            children.append(
+                f"""                    <munit-tools:attributes value="#[read(MunitTools::getResourceAsString('{resource_folder}/{attributes_file}'), 'application/json')]" mediaType="{attributes_media_type}"/>"""
+            )
+
+        if not children:
+            return "", files
+        return (
+            "\n                <munit-tools:then-return>\n"
+            + "\n".join(children)
+            + "\n                </munit-tools:then-return>",
+            files,
+        )
+
+    @staticmethod
+    def _parse_json_object(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        text = str(value or "").strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
     def _build_verify_calls(self, flow_context: Dict[str, Any], scenario: Dict[str, Any]) -> str:
         """Generate validation-time verify-call blocks for side-effect connectors."""
         parts = []
@@ -1111,7 +1334,7 @@ class DeterministicMUnitBuilder:
         }
 
         if not error_scenario:
-            for item in flow_context.get("mock_plan", []) or []:
+            for item in self._dedupe_mock_plan(flow_context.get("mock_plan", []) or []):
                 if item.get("action") != "verify-call":
                     continue
                 parts.append(self._verify_call_xml(
