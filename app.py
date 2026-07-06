@@ -866,6 +866,10 @@ class WebMUnitGenerator:
                 connector_samples=self._connector_samples_for_flow(connector_samples, target_flow),
             )
             for request_item in plan.get("clarificationRequests", []) or []:
+                if request_item.get("type") == "dynamic_flow_ref_resolution":
+                    # Dynamic routing belongs to selected-flow tracing (Step 5),
+                    # never to the final sample-data dialog.
+                    continue
                 item = dict(request_item)
                 item.setdefault("flow", target_flow)
                 key = json.dumps(item, sort_keys=True, default=str)
@@ -2340,6 +2344,7 @@ class WebMUnitGenerator:
                 "execution_flows": execution_flows,
                 "nodes": trace_nodes,
                 "external_flow_refs": context.get("external_flow_refs", []) or [],
+                "unresolved_flow_refs": context.get("unresolved_flow_refs", []) or [],
                 "munit_enable_flow_sources": context.get("munit_enable_flow_sources", []) or [],
             })
 
@@ -3022,12 +3027,24 @@ def _read_dependency_artifact(file) -> dict:
     if filename.endswith((".xml", ".mule")):
         content = generator._read_file_content(file)
         return {
-            "combined_xml": f"\n\n--- Dependency XML from {file.filename} ---\n{content}\n",
+            "combined_xml": f"\n\n--- Content from {file.filename} ---\n{content}\n",
             "xml_count": 1 if content.strip() else 0,
             "scan_details": {"mule_files": [file.filename]},
         }
 
     raise Exception("Dependency artifact must be a .jar, .zip, .xml, or .mule file.")
+
+
+def _as_combined_xml_documents(xml_content: str, fallback_name: str) -> str:
+    """Convert standalone Mule XML to the same multi-document envelope used for project ZIPs."""
+    content = (xml_content or "").strip()
+    if not content:
+        return ""
+    if re.search(r"\n?--- Content from .+? ---\n", content):
+        return content
+    safe_name = secure_filename(fallback_name) or "uploaded.xml"
+    return f"--- Content from {safe_name} ---\n{content}\n"
+
 
 def _analysis_fingerprint(params: dict) -> str:
     """Stable fingerprint for analyzed Mule project content used by resume cache."""
@@ -3387,9 +3404,11 @@ def analyze_enhanced_flows():
         analysis_fingerprint = _analysis_fingerprint(params)
         analysis_cache[analysis_id] = {
             'xml_file': params.get('xml_file', ''),
+            'base_xml_file': params.get('xml_file', ''),
             'project_dwl_files': params.get('project_dwl_files', {}) or {},
             'build_validation': params.get('build_validation', {}) or {},
             'project_scan': params.get('project_scan', {}) or {},
+            'base_project_scan': params.get('project_scan', {}) or {},
             'flow_summary': flow_summary,
             'fingerprint': analysis_fingerprint,
             'created_at': time.time(),
@@ -3437,17 +3456,36 @@ def resolve_selected_flow_context():
                 selected_flows = [item.strip() for item in selected_flows.split(",") if item.strip()]
 
         xml_file = cached.get("xml_file", "")
+        base_xml_file = cached.get("base_xml_file") or xml_file
+        resolution_mode = (params.get("dependency_resolution_mode") or "").strip().lower()
         build_validation = cached.get("build_validation", {}) or {}
-        project_scan = cached.get("project_scan", {}) or {}
+        project_scan = dict(cached.get("base_project_scan") or cached.get("project_scan", {}) or {})
 
         dependency_file = files.get("dependency_artifact")
-        if dependency_file and getattr(dependency_file, "filename", ""):
+        external_links = generator._build_external_flow_links_dict(params)
+        if dependency_file and external_links:
+            return jsonify({
+                "success": False,
+                "error": "Choose either dependency artifact upload or manual flow declaration, not both."
+            }), 400
+        if resolution_mode == "upload" and not (
+            dependency_file and getattr(dependency_file, "filename", "")
+        ):
+            return jsonify({"success": False, "error": "Select a JAR, ZIP, XML, or Mule file first."}), 400
+        if resolution_mode == "manual" and not external_links:
+            return jsonify({"success": False, "error": "Select at least one local callback flow."}), 400
+
+        xml_file = base_xml_file
+        if resolution_mode == "upload" and dependency_file and getattr(dependency_file, "filename", ""):
             dep_project = _read_dependency_artifact(dependency_file)
             if dep_project.get("combined_xml", "").strip():
                 xml_file = (
-                    xml_file
-                    + f"\n\n--- Dependency artifact from {dependency_file.filename} ---\n"
-                    + dep_project["combined_xml"]
+                    _as_combined_xml_documents(base_xml_file, "uploaded-application.xml")
+                    + "\n\n"
+                    + _as_combined_xml_documents(
+                        dep_project["combined_xml"],
+                        dependency_file.filename,
+                    )
                 )
                 project_scan = dict(project_scan)
                 project_scan.setdefault("dependency_artifacts", []).append({
@@ -3459,7 +3497,8 @@ def resolve_selected_flow_context():
         flow_summary = generator.xml_analyzer.analyze_mule_project(xml_file)
         flow_summary = generator.apply_selected_flows(flow_summary, selected_flows)
         flow_summary = generator._apply_user_dynamic_flow_targets(flow_summary, params)
-        flow_summary = generator._apply_external_flow_links(flow_summary, params)
+        if resolution_mode == "manual":
+            flow_summary = generator._apply_external_flow_links(flow_summary, params)
 
         cached.update({
             "xml_file": xml_file,

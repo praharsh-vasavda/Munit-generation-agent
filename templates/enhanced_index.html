@@ -467,11 +467,6 @@
       <p style="font-size:.8rem;color:var(--pwc-gray);margin-bottom:1rem">
         Provide the test data for this flow. These values will populate <code>munit:behavior / set-event</code> blocks.
       </p>
-      <div id="dynamicFlowTargetsWrap" class="hidden" style="padding:.75rem 1rem;background:var(--pwc-gray-bg);border-left:3px solid var(--pwc-orange);margin-bottom:1rem">
-        <label style="display:block;font-size:.78rem;font-weight:600;color:var(--pwc-gray-dark);margin-bottom:.4rem;text-transform:uppercase;letter-spacing:.04em">Dynamic Flow Targets</label>
-        <textarea id="dynamicFlowTargets" class="sample-input" rows="4" placeholder='flowA, flowB'></textarea>
-        <p style="font-size:.72rem;color:var(--pwc-gray);margin-top:.3rem">Enter concrete flow names, comma/newline separated, or JSON like [{"condition":"otherwise","targetFlow":"flowA"}].</p>
-      </div>
       <div class="tab-bar mb-4" id="modalTabs">
         <button class="tab-btn active" onclick="switchModalTab('payload')">Request Payload</button>
         <button class="tab-btn" onclick="switchModalTab('queryParams')">Query Params</button>
@@ -524,6 +519,8 @@ const state = {
   unreachableFlows: [],
   selectedFlowTrace: null,
   dependencyArtifactFile: null,
+  dependencyResolutionMode: null,
+  manualDependencyCandidates: null,
   selectedFlows: new Set(),
   buildValidation: {},
   connectorSamples: {},
@@ -675,6 +672,7 @@ async function analyzeFlows() {
     if (!data.success) throw new Error(data.error||'Analysis failed');
     state.analysisId      = data.analysis_id;
     state.buildValidation = data.build_validation||{};
+    resetDependencyResolutionState();
 
     // Three-category flow grouping from the API
     const sel = data.selection || {};
@@ -832,6 +830,7 @@ function _flowCard(f, category) {
 }
 
 function toggleFlow(name) {
+  resetDependencyResolutionState();
   const chk  = document.getElementById(`chk-${name}`);
   const card = document.getElementById(`fc-${name}`);
   const all  = [...(state.entryPointFlows||[]), ...(state.apiResourceFlows||[]), ...(state.internalFlows||[])];
@@ -879,6 +878,15 @@ function updateStep5Btn() { document.getElementById('step5Btn').disabled = state
 async function resolveSelectedFlowBeforeMocks() {
   if (!state.selectedFlows.size) return;
   const panel = document.getElementById('dependencyResolutionPanel');
+  if (
+    panel
+    && !panel.classList.contains('hidden')
+    && (state.selectedFlowTrace?.external_stops || []).length
+    && !state.dependencyResolutionMode
+  ) {
+    showToast('Select either Choice 1 or Choice 2 first.', 'error');
+    return;
+  }
   const btn = document.getElementById('step5Btn');
   btn.disabled = true;
   btn.textContent = 'Tracing…';
@@ -888,13 +896,15 @@ async function resolveSelectedFlowBeforeMocks() {
     fd.append('analysis_id', state.analysisId || '');
     fd.append('selected_flows', JSON.stringify([...state.selectedFlows]));
 
-    const links = collectManualExternalLinks();
-    if (links.length) {
+    const mode = state.dependencyResolutionMode;
+    const links = mode === 'manual' ? collectManualExternalLinks() : [];
+    fd.append('dependency_resolution_mode', mode || '');
+    if (mode === 'manual' && links.length) {
       const existing = state.flowTestData || {};
       state.flowTestData = {...existing, externalFlowLinks: links};
       fd.append('flow_test_data', JSON.stringify(state.flowTestData));
     }
-    if (state.dependencyArtifactFile) {
+    if (mode === 'upload' && state.dependencyArtifactFile) {
       fd.append('dependency_artifact', state.dependencyArtifactFile);
     }
 
@@ -905,11 +915,16 @@ async function resolveSelectedFlowBeforeMocks() {
     applySelectionPayload(data.selection || {});
     state.selectedFlowTrace = data.selected_flow_trace || {};
     const stops = (state.selectedFlowTrace.external_stops || []);
+    const unresolved = (state.selectedFlowTrace.traces || [])
+      .flatMap(trace => trace.unresolved_flow_refs || []);
 
-    if (stops.length && !links.length) {
+    if ((stops.length || unresolved.length) && !(mode === 'manual' && links.length)) {
       renderDependencyResolutionPanel(state.selectedFlowTrace);
       panel.classList.remove('hidden');
       btn.textContent = 'Apply Choice & Continue →';
+      if (mode === 'upload' && unresolved.length) {
+        showToast('Uploaded code was analyzed, but its dynamic flow target is still unresolved.', 'error');
+      }
       return;
     }
 
@@ -933,7 +948,11 @@ function applySelectionPayload(sel) {
 
 function renderDependencyResolutionPanel(trace) {
   const stops = trace.external_stops || [];
-  const local = trace.local_flow_candidates || [];
+  const unresolved = (trace.traces || []).flatMap(item => item.unresolved_flow_refs || []);
+  if (!state.manualDependencyCandidates) {
+    state.manualDependencyCandidates = [...(trace.local_flow_candidates || [])];
+  }
+  const local = state.manualDependencyCandidates;
   const traces = trace.traces || [];
   const firstHint = (stops[0]?.dependency_hint || trace.dependency_hints?.[0] || {});
   const localPath = firstHint.local_maven_path || '~/.m2/repository/<group>/<artifact>/<version>/<artifact>-<version>.jar';
@@ -954,6 +973,15 @@ function renderDependencyResolutionPanel(trace) {
     <div style="padding:.75rem;background:white;border-left:3px solid #b35c00;margin:.6rem 0">
       <div style="font-weight:700;font-size:.85rem;color:var(--pwc-black)">Flow ${esc(stop.flow)} is from a runtime dependency</div>
       <p style="font-size:.76rem;color:var(--pwc-gray);margin-top:.25rem">${esc(stop.message || '')}</p>
+    </div>
+  `).join('');
+  const unresolvedHtml = unresolved.map(item => `
+    <div style="padding:.75rem;background:white;border-left:3px solid var(--pwc-error);margin:.6rem 0">
+      <div style="font-weight:700;font-size:.85rem;color:var(--pwc-black)">Dynamic flow target is unresolved in ${esc(item.flow || 'the traced flow')}</div>
+      <p style="font-size:.76rem;color:var(--pwc-gray);margin-top:.25rem">
+        ${esc(item.doc_name || item.expression || 'Dynamic flow-ref')}: ${esc(item.expression || '')}
+      </p>
+      <p style="font-size:.72rem;color:var(--pwc-gray);margin-top:.25rem">The trace cannot continue until this value can be derived from the uploaded application or dependency code.</p>
     </div>
   `).join('');
 
@@ -982,19 +1010,27 @@ function renderDependencyResolutionPanel(trace) {
       <button class="btn-ghost" onclick="clearDependencyResolution()">Clear choices</button>
     </div>
     ${stopHtml}
+    ${unresolvedHtml}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:1rem">
-      <div style="background:white;padding:.875rem;border:1px solid var(--pwc-gray-border)">
-        <div style="font-weight:700;font-size:.82rem;color:var(--pwc-black)">Choice 1 — Upload JAR/XML</div>
+      <div id="dependencyUploadChoice" style="background:white;padding:.875rem;border:1px solid var(--pwc-gray-border)">
+        <label style="display:flex;align-items:center;gap:.45rem;font-weight:700;font-size:.82rem;color:var(--pwc-black)">
+          <input type="radio" name="dependencyResolutionMode" value="upload" onchange="setDependencyResolutionMode('upload')" ${state.dependencyResolutionMode === 'upload' ? 'checked' : ''} ${state.dependencyResolutionMode === 'manual' ? 'disabled' : ''}>
+          Choice 1 — Upload JAR/XML
+        </label>
         <p style="font-size:.74rem;color:var(--pwc-gray);margin:.35rem 0">Find this file on your machine if it exists:</p>
         <code style="display:block;white-space:pre-wrap;word-break:break-all;background:var(--pwc-gray-bg);padding:.5rem;font-size:.72rem">${esc(localPath)}</code>
         <input type="file" id="dependencyArtifactInput" accept=".jar,.zip,.xml,.mule" style="margin-top:.75rem;font-size:.75rem" onchange="onDependencyArtifactSelect(event)">
         <div id="dependencyArtifactLabel" style="font-size:.72rem;color:var(--pwc-orange);margin-top:.35rem">${state.dependencyArtifactFile ? esc(state.dependencyArtifactFile.name) : 'No dependency artifact selected'}</div>
       </div>
-      <div style="background:white;padding:.875rem;border:1px solid var(--pwc-gray-border)">
-        <div style="font-weight:700;font-size:.82rem;color:var(--pwc-black)">Choice 2 — Declare manually</div>
-        ${checklist || '<p style="font-size:.75rem;color:var(--pwc-gray)">No local flows available to link.</p>'}
+      <div id="dependencyManualChoice" style="background:white;padding:.875rem;border:1px solid var(--pwc-gray-border)">
+        <label style="display:flex;align-items:center;gap:.45rem;font-weight:700;font-size:.82rem;color:var(--pwc-black)">
+          <input type="radio" name="dependencyResolutionMode" value="manual" onchange="setDependencyResolutionMode('manual')" ${state.dependencyResolutionMode === 'manual' ? 'checked' : ''} ${state.dependencyResolutionMode === 'upload' ? 'disabled' : ''}>
+          Choice 2 — Declare manually
+        </label>
+        <div id="dependencyManualControls">${checklist || '<p style="font-size:.75rem;color:var(--pwc-gray)">No local flows available to link.</p>'}</div>
       </div>
     </div>`;
+  syncDependencyResolutionControls();
 }
 
 function depId(externalFlow, localFlow) {
@@ -1002,12 +1038,14 @@ function depId(externalFlow, localFlow) {
 }
 
 function onDependencyArtifactSelect(e) {
+  setDependencyResolutionMode('upload');
   state.dependencyArtifactFile = e.target.files && e.target.files[0] ? e.target.files[0] : null;
   const label = document.getElementById('dependencyArtifactLabel');
   if (label) label.textContent = state.dependencyArtifactFile ? `${state.dependencyArtifactFile.name} (${fmtBytes(state.dependencyArtifactFile.size)})` : 'No dependency artifact selected';
 }
 
 function collectManualExternalLinks() {
+  if (state.dependencyResolutionMode !== 'manual') return [];
   const panel = document.getElementById('dependencyResolutionPanel');
   if (!panel || panel.classList.contains('hidden')) return [];
   const byExternal = {};
@@ -1024,8 +1062,42 @@ function collectManualExternalLinks() {
   });
 }
 
+function setDependencyResolutionMode(mode) {
+  state.dependencyResolutionMode = mode;
+  if (mode === 'upload') {
+    document.querySelectorAll('#dependencyManualControls input[type="checkbox"]').forEach(chk => chk.checked = false);
+    document.querySelectorAll('#dependencyManualControls textarea').forEach(ta => ta.value = '');
+    if (state.flowTestData) delete state.flowTestData.externalFlowLinks;
+  } else if (mode === 'manual') {
+    state.dependencyArtifactFile = null;
+    const file = document.getElementById('dependencyArtifactInput');
+    if (file) file.value = '';
+    const label = document.getElementById('dependencyArtifactLabel');
+    if (label) label.textContent = 'No dependency artifact selected';
+  }
+  syncDependencyResolutionControls();
+}
+
+function syncDependencyResolutionControls() {
+  const uploadActive = state.dependencyResolutionMode === 'upload';
+  const manualActive = state.dependencyResolutionMode === 'manual';
+  const file = document.getElementById('dependencyArtifactInput');
+  if (file) file.disabled = !uploadActive;
+  document.querySelectorAll('#dependencyManualControls input, #dependencyManualControls textarea')
+    .forEach(control => control.disabled = !manualActive);
+  const uploadCard = document.getElementById('dependencyUploadChoice');
+  const manualCard = document.getElementById('dependencyManualChoice');
+  const uploadRadio = document.querySelector('input[name="dependencyResolutionMode"][value="upload"]');
+  const manualRadio = document.querySelector('input[name="dependencyResolutionMode"][value="manual"]');
+  if (uploadRadio) uploadRadio.disabled = manualActive;
+  if (manualRadio) manualRadio.disabled = uploadActive;
+  if (uploadCard) uploadCard.style.opacity = state.dependencyResolutionMode && !uploadActive ? '.5' : '1';
+  if (manualCard) manualCard.style.opacity = state.dependencyResolutionMode && !manualActive ? '.5' : '1';
+}
+
 function clearDependencyResolution() {
   state.dependencyArtifactFile = null;
+  state.dependencyResolutionMode = null;
   const panel = document.getElementById('dependencyResolutionPanel');
   panel?.querySelectorAll('input[type="checkbox"]').forEach(chk => chk.checked = false);
   panel?.querySelectorAll('textarea').forEach(ta => ta.value = '');
@@ -1033,6 +1105,21 @@ function clearDependencyResolution() {
   if (file) file.value = '';
   const label = document.getElementById('dependencyArtifactLabel');
   if (label) label.textContent = 'No dependency artifact selected';
+  panel?.querySelectorAll('input[name="dependencyResolutionMode"]').forEach(radio => radio.checked = false);
+  syncDependencyResolutionControls();
+}
+
+function resetDependencyResolutionState() {
+  state.dependencyArtifactFile = null;
+  state.dependencyResolutionMode = null;
+  state.manualDependencyCandidates = null;
+  state.selectedFlowTrace = null;
+  if (state.flowTestData) delete state.flowTestData.externalFlowLinks;
+  const panel = document.getElementById('dependencyResolutionPanel');
+  if (panel) {
+    panel.classList.add('hidden');
+    panel.innerHTML = '';
+  }
 }
 
 // ─── Connector samples ────────────────────────────────────────────────────────
@@ -1373,6 +1460,7 @@ async function generateMUnit() {
       const extra = await askForFlowData((data.clarification_requests||[])[0]?.flow||[...state.selectedFlows][0], data.clarification_requests||[]);
       if (extra) {
         fd.set('flow_test_data',JSON.stringify(extra));
+        fd.set('allow_synthetic_defaults','true');
         setProgress(50,'Regenerating with test data…');
         const res2  = await fetch('/api/enhanced/generate',{method:'POST',body:fd});
         const data2 = await res2.json();
@@ -1419,6 +1507,7 @@ async function pollJob(jobId, fd) {
         const extra=await askForFlowData((result.clarification_requests||[])[0]?.flow||[...state.selectedFlows][0], result.clarification_requests||[]);
         if (!extra) throw new Error('Generation requires additional sample data');
         fd.set('flow_test_data',JSON.stringify(extra));
+        fd.set('allow_synthetic_defaults','true');
         setProgress(50,'Regenerating with test data…');
         const retryRes = await fetch('/api/enhanced/generate',{method:'POST',body:fd});
         const retryData = await retryRes.json();
@@ -1441,14 +1530,6 @@ function askForFlowData(flowName, requests=[]) {
     const reason = (requests||[]).map(r => r.reason || r.title).filter(Boolean).join('\n');
     document.querySelector('#flowDataModal .modal-body > p').textContent =
       reason || 'Provide the test data for this flow. These values will populate munit:behavior / set-event blocks.';
-    const dynamicRequests = (requests||[]).filter(r => r.type === 'dynamic_flow_ref_resolution');
-    const dynamicWrap = document.getElementById('dynamicFlowTargetsWrap');
-    const dynamicInput = document.getElementById('dynamicFlowTargets');
-    if (dynamicWrap && dynamicInput) {
-      dynamicWrap.classList.toggle('hidden', !dynamicRequests.length);
-      dynamicInput.value = '';
-      dynamicInput.placeholder = dynamicRequests[0]?.placeholder || 'flowA, flowB';
-    }
     document.getElementById('flowDataModal').classList.remove('hidden');
     switchModalTab('payload'); initKvRows();
   });
@@ -1463,7 +1544,6 @@ function submitFlowData() {
     queryParams:      collectKvRows('queryParamsRows'),
     uriParams:        collectKvRows('uriParamsRows'),
     headers:          collectKvRows('headersRows'),
-    dynamicFlowTargets: document.getElementById('dynamicFlowTargets')?.value||'',
   };
   state.flowTestData = data;
   document.getElementById('flowDataModal').classList.add('hidden');

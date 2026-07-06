@@ -56,15 +56,17 @@ from typing import Dict, List, Optional, Set
 # Match any quoted string inside a DW expression
 _QUOTED_RE = re.compile(r"""['"]([^'"]{1,200})['"]""")
 
-# Variable name from vars.x or variables.x
-_VAR_REF_RE = re.compile(r"""\b(?:vars|variables)\.([A-Za-z_][A-Za-z0-9_\-]*)""")
+# Variable name from Mule 4 vars.x or Mule 3 flowVars.x/sessionVars.x.
+_VAR_REF_RE = re.compile(
+    r"""\b(?:vars|variables|flowVars|sessionVars)\.([A-Za-z_][A-Za-z0-9_\-]*)"""
+)
 
 # References to object fields: vars.route.flowName, payload.flowName, payload['flowName']
 _REF_DOT_RE = re.compile(
-    r"""\b(vars|variables|payload|attributes)\.([A-Za-z_][A-Za-z0-9_\-]*(?:\.[A-Za-z_][A-Za-z0-9_\-]*)*)"""
+    r"""\b(vars|variables|flowVars|sessionVars|payload|attributes)\.([A-Za-z_][A-Za-z0-9_\-]*(?:\.[A-Za-z_][A-Za-z0-9_\-]*)*)"""
 )
 _REF_BRACKET_RE = re.compile(
-    r"""\b(vars|variables|payload|attributes)(?:\.([A-Za-z_][A-Za-z0-9_\-]*))?\s*\[\s*['"]([^'"]+)['"]\s*\]"""
+    r"""\b(vars|variables|flowVars|sessionVars|payload|attributes)(?:\.([A-Za-z_][A-Za-z0-9_\-]*))?\s*\[\s*['"]([^'"]+)['"]\s*\]"""
 )
 
 # DW if/else:  if (cond) 'X' else 'Y'
@@ -403,7 +405,13 @@ class DynamicFlowResolver:
             for val in self._var_values.get(var_name, set()):
                 # Replace vars.x with the known value and build candidate
                 candidate = inner
-                for vr in [f"vars.{var_name}", f"variables.{var_name}", var_name]:
+                for vr in [
+                    f"vars.{var_name}",
+                    f"variables.{var_name}",
+                    f"flowVars.{var_name}",
+                    f"sessionVars.{var_name}",
+                    var_name,
+                ]:
                     candidate = candidate.replace(vr, val.strip("'\""))
                 # Remove ++ and quotes, concatenate
                 parts = re.split(r'\+\+', candidate)
@@ -548,7 +556,13 @@ def _local(tag: str) -> str:
 
 def _is_dynamic(expr: str) -> bool:
     """Return True if the expression contains a DW expression or variable."""
-    return "#[" in expr or "vars." in expr or "++" in expr
+    return (
+        "#[" in expr
+        or "vars." in expr
+        or "flowVars." in expr
+        or "sessionVars." in expr
+        or "++" in expr
+    )
 
 
 def _add(lst: List[str], value: str) -> None:

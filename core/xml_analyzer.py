@@ -1617,10 +1617,43 @@ class XMLAnalyzer:
         visiting = set(visiting)
         visiting.add(flow_name)
         vars_map = {key: set(values) for key, values in (inherited_vars or {}).items()}
+        # The per-flow resolver scans complete set-variable/DataWeave bodies
+        # and understands forms that processor metadata may not preserve
+        # verbatim. Merge those candidates before following child calls so
+        # values can cross local -> dependency -> local flow boundaries.
+        for key, values in (node.get("var_value_map", {}) or {}).items():
+            vars_map.setdefault(key, set()).update(values or [])
         changed = False
 
         for processor in node.get("processor_chain", []) or []:
             self._record_processor_var_literals(processor, vars_map)
+            lookup_candidates: List[str] = []
+            for text in (processor.get("value", ""), processor.get("dwl_excerpt", "")):
+                for lookup_expression in re.findall(
+                    r"""lookup\s*\(\s*([^,()]+)\s*,""",
+                    text or "",
+                ):
+                    for candidate in self._resolve_dynamic_expression_with_vars(
+                        lookup_expression,
+                        vars_map,
+                        flow_names,
+                    ):
+                        if candidate not in lookup_candidates:
+                            lookup_candidates.append(candidate)
+            for child in lookup_candidates:
+                if child not in node.get("dw_lookup_refs", []):
+                    node.setdefault("dw_lookup_refs", []).append(child)
+                    changed = True
+                if child not in node.get("children", []):
+                    node.setdefault("children", []).append(child)
+                    changed = True
+                child_node = graph.get(child)
+                if child_node is not None and flow_name not in child_node.get("parents", []):
+                    child_node.setdefault("parents", []).append(flow_name)
+                    changed = True
+                if self._propagate_dynamic_refs_from_flow(child, graph, flow_names, vars_map, visiting):
+                    changed = True
+
             if processor.get("type") != "flow-ref":
                 continue
 
@@ -1653,6 +1686,32 @@ class XMLAnalyzer:
             for child in candidates:
                 if child not in graph:
                     continue
+                if child not in node.get("children", []):
+                    node.setdefault("children", []).append(child)
+                    changed = True
+                child_node = graph.get(child)
+                if child_node is not None and flow_name not in child_node.get("parents", []):
+                    child_node.setdefault("parents", []).append(flow_name)
+                    changed = True
+                if self._propagate_dynamic_refs_from_flow(child, graph, flow_names, vars_map, visiting):
+                    changed = True
+
+        # Some lookup() calls live in CDATA that is not represented as a
+        # standalone processor value. Re-scan the complete flow XML after all
+        # local assignments have been collected, while retaining inherited
+        # values from its callers.
+        for lookup_expression in re.findall(
+            r"""lookup\s*\(\s*([^,()]+)\s*,""",
+            node.get("xml_snippet", "") or "",
+        ):
+            for child in self._resolve_dynamic_expression_with_vars(
+                lookup_expression,
+                vars_map,
+                flow_names,
+            ):
+                if child not in node.get("dw_lookup_refs", []):
+                    node.setdefault("dw_lookup_refs", []).append(child)
+                    changed = True
                 if child not in node.get("children", []):
                     node.setdefault("children", []).append(child)
                     changed = True
@@ -1696,10 +1755,44 @@ class XMLAnalyzer:
                     vars_map.setdefault(f"{var_name}.{field}", set()).add(literal)
                     if field.lower() in {"flowname", "flow_name", "targetflow", "target_flow"}:
                         vars_map.setdefault(var_name, set()).add(literal)
+            for field, source_expression in self._extract_object_reference_fields(text).items():
+                source_values = set()
+                for source_key in self._dynamic_reference_keys(source_expression):
+                    source_values.update(vars_map.get(source_key, set()))
+                if not source_values:
+                    continue
+                if is_payload_write:
+                    destination = f"payload.{field}"
+                elif is_attributes_write:
+                    destination = f"attributes.{field}"
+                else:
+                    destination = f"{var_name}.{field}"
+                vars_map.setdefault(destination, set()).update(source_values)
+                if (
+                    not is_payload_write
+                    and not is_attributes_write
+                    and field.lower() in {
+                        "flowname",
+                        "flow_name",
+                        "targetflow",
+                        "target_flow",
+                        "invokeflow",
+                        "invoke_flow",
+                        "invokeendpointflow",
+                        "invoke_endpoint_flow",
+                    }
+                ):
+                    vars_map.setdefault(var_name, set()).update(source_values)
             values.extend(re.findall(r"""['"]([^'"]+)['"]""", text))
             body = text.split("---", 1)[1].strip() if "---" in text else text.strip()
             if body and len(body) < 200 and not re.search(r"\b(payload|vars|attributes)\b", body):
                 values.append(body.strip("'\""))
+            if not is_payload_write and not is_attributes_write:
+                # Resolve aliases such as:
+                #   vars.param.invokeEndpointFlow -> vars.flowName
+                # using values accumulated in an upstream/local flow.
+                for source_key in self._dynamic_reference_keys(text):
+                    values.extend(vars_map.get(source_key, set()))
 
         if is_payload_write or is_attributes_write:
             return
@@ -1737,6 +1830,17 @@ class XMLAnalyzer:
         return fields
 
     @staticmethod
+    def _extract_object_reference_fields(text: str) -> Dict[str, str]:
+        """Map object fields to scoped references used as their values."""
+        fields: Dict[str, str] = {}
+        for match in re.finditer(
+            r"""['"]?([A-Za-z_][A-Za-z0-9_\-]*)['"]?\s*:\s*((?:vars|variables|flowVars|sessionVars|payload|attributes)(?:\.[A-Za-z_][A-Za-z0-9_\-]*)+)""",
+            text or "",
+        ):
+            fields[match.group(1)] = match.group(2)
+        return fields
+
+    @staticmethod
     def _dynamic_reference_keys(expression: str) -> List[str]:
         keys: List[str] = []
 
@@ -1746,7 +1850,7 @@ class XMLAnalyzer:
 
         text = expression or ""
         for scope, path in re.findall(
-            r"""\b(vars|variables|payload|attributes)\.([A-Za-z_][A-Za-z0-9_\-]*(?:\.[A-Za-z_][A-Za-z0-9_\-]*)*)""",
+            r"""\b(vars|variables|flowVars|sessionVars|payload|attributes)\.([A-Za-z_][A-Za-z0-9_\-]*(?:\.[A-Za-z_][A-Za-z0-9_\-]*)*)""",
             text,
         ):
             if scope in {"payload", "attributes"}:
@@ -1758,7 +1862,7 @@ class XMLAnalyzer:
                 add(path.split(".", 1)[0])
 
         for scope, base, field in re.findall(
-            r"""\b(vars|variables|payload|attributes)(?:\.([A-Za-z_][A-Za-z0-9_\-]*))?\s*\[\s*['"]([^'"]+)['"]\s*\]""",
+            r"""\b(vars|variables|flowVars|sessionVars|payload|attributes)(?:\.([A-Za-z_][A-Za-z0-9_\-]*))?\s*\[\s*['"]([^'"]+)['"]\s*\]""",
             text,
         ):
             if scope in {"payload", "attributes"}:
@@ -1769,7 +1873,10 @@ class XMLAnalyzer:
             else:
                 add(field)
 
-        for var_name in re.findall(r"\b(?:vars|variables)\.([A-Za-z_][A-Za-z0-9_-]*)", text):
+        for var_name in re.findall(
+            r"\b(?:vars|variables|flowVars|sessionVars)\.([A-Za-z_][A-Za-z0-9_-]*)",
+            text,
+        ):
             add(var_name)
         return keys
 
@@ -1810,7 +1917,13 @@ class XMLAnalyzer:
 
     def _is_dynamic_flow_ref(self, ref_name: str) -> bool:
         text = (ref_name or "").strip()
-        return text.startswith("#[") or "vars." in text or "${" in text
+        return (
+            text.startswith("#[")
+            or "vars." in text
+            or "flowVars." in text
+            or "sessionVars." in text
+            or "${" in text
+        )
 
     def _build_flow_contexts(self, test_targets: List[str], flow_graph: Dict[str, Dict]) -> Dict[str, Dict]:
         """Build target-specific context packets for focused MUnit generation."""
@@ -2112,7 +2225,7 @@ class XMLAnalyzer:
             return "dynamic flow-ref target depends on runtime request attributes"
         if re.search(r"\b(payload|attributes)\.", expr):
             return "dynamic flow-ref target depends on runtime message data"
-        if re.search(r"\b(?:vars|variables)\.", expr):
+        if re.search(r"\b(?:vars|variables|flowVars|sessionVars)\.", expr):
             return "dynamic flow-ref target variable could not be resolved from XML or inline DataWeave"
         if "p(" in expr or "Mule::p" in expr:
             return "dynamic flow-ref target depends on property/config lookup"
@@ -2367,6 +2480,19 @@ class XMLAnalyzer:
                             "level": level + 1,
                             "reason": "flow-ref target not found in analyzed Mule project",
                         })
+
+            # DataWeave lookup() invokes a flow without a flow-ref processor.
+            # Follow those graph edges after the containing processor chain.
+            for child in node.get("dw_lookup_refs", []) or []:
+                if child in flow_graph:
+                    visit(child, level + 1, flow_name)
+                else:
+                    warnings.append({
+                        "flow": child,
+                        "parent": flow_name,
+                        "level": level + 1,
+                        "reason": "lookup() target not found in analyzed Mule project",
+                    })
 
         visit(target, 0)
         return {
