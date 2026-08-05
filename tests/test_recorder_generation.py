@@ -15,6 +15,38 @@ def assert_assert_module(content, expected_fragment):
     assert expected_fragment in content
 
 
+def test_missing_referenced_resource_is_preflight_error_without_write_failure(tmp_path):
+    builder = DeterministicMUnitBuilder(output_dir=str(tmp_path))
+    suite_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+      xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools">
+    <munit:config name="missing-resource-suite"/>
+    <munit:test name="missing-resource-test">
+        <munit:behavior>
+            <munit-tools:mock-when processor="http:request">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[MunitTools::getResourceAsString(&quot;apiFlowtest/missing.dwl&quot;)]" mediaType="application/json"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+    </munit:test>
+</mule>
+"""
+    metadata = {
+        "target_flow": "apiFlow",
+        "suite_name": "apiFlow-suite",
+        "resource_folder": "apiFlowtest",
+        "resource_files": {},
+    }
+
+    preflight = builder._validate_generated_suite(suite_xml, metadata["resource_files"], {})
+
+    assert preflight["valid"] is False
+    assert "Missing resource file for reference: apiFlowtest/missing.dwl" in preflight["errors"]
+    paths = builder.write_maven_layout(suite_xml, metadata)
+    assert paths["missing_resource_references"] == "apiFlowtest/missing.dwl"
+
+
 def test_prompt_includes_static_analysis_compliance_policy():
     prompt = PromptBuilder(max_tokens=8000).build_prompt(
         flow_summary={

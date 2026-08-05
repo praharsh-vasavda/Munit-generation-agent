@@ -887,12 +887,10 @@ class DeterministicMUnitBuilder:
             resource_path.write_text(content, encoding="utf-8")
             paths[rel_name] = str(resource_path)
 
-        referenced_resources = re.findall(
-            r"MunitTools::getResourceAsString\('([^']+)'\)",
-            suite_xml or "",
-        )
+        referenced_resources = self._extract_munit_resource_references(suite_xml)
         generated_prefix = f"{resource_folder}/"
         resource_contents = metadata.get("resource_files") or {}
+        missing_resources: List[str] = []
         for reference in referenced_resources:
             if not reference.startswith(generated_prefix):
                 continue
@@ -907,8 +905,12 @@ class DeterministicMUnitBuilder:
                     "Generated MUnit references an unavailable resource: %s",
                     reference,
                 )
+                missing_resources.append(reference)
                 continue
             paths.setdefault(reference, str(referenced_path))
+
+        if missing_resources:
+            paths["missing_resource_references"] = ", ".join(sorted(missing_resources))
 
         paths["suite_file_maven"] = str(suite_path)
         return paths
@@ -2643,7 +2645,7 @@ import {resource_folder}::{module_name}
         except ET.ParseError as exc:
             errors.append(f"Generated MUnit XML is not well formed: {exc}")
 
-        refs = re.findall(r"MunitTools::getResourceAsString\('([^']+)'\)", suite_xml or "")
+        refs = self._extract_munit_resource_references(suite_xml)
         resource_names = set(resource_files.keys())
         for ref in refs:
             name = ref.rsplit("/", 1)[-1]
@@ -2703,6 +2705,15 @@ import {resource_folder}::{module_name}
                     warnings.append(f"Missing verify-call for outbound side-effect connector: {processor} {match_value or ''}".strip())
 
         return {"valid": not errors, "errors": errors, "warnings": warnings}
+
+    def _extract_munit_resource_references(self, suite_xml: str) -> List[str]:
+        """Return sidecar resource paths referenced by MunitTools::getResourceAsString."""
+        normalized_xml = (suite_xml or "").replace("&quot;", '"').replace("&apos;", "'")
+        refs = re.findall(
+            r"MunitTools::getResourceAsString\(\s*(['\"])(.*?)\1\s*\)",
+            normalized_xml,
+        )
+        return [path for _, path in refs if path]
 
     def _plan_to_payload_dwl(self, plan: Dict[str, Any]) -> str:
         """
